@@ -75,3 +75,38 @@ export const validateUserUpdate = [
     .withMessage('Password must contain at least one uppercase letter, one lowercase letter, and one number'),
   handleValidationErrors
 ];
+
+export const validatePatient = [
+  body('name')
+    .trim()
+    .isLength({ min: 2, max: 100 })
+    .withMessage('Patient name must be between 2 and 100 characters')
+    .matches(/^[a-zA-Z\s]+$/)
+    .withMessage('Patient name can only contain letters and spaces'),
+  body('age')
+    .isInt({ min: 0, max: 150 })
+    .withMessage('Age must be a number between 0 and 150'),
+  body('gender')
+    .isIn(['male', 'female', 'other'])
+    .withMessage('Gender must be male, female, or other'),
+  handleValidationErrors
+];
+
+export const validatePatientUpdate = [
+  body('name')
+    .optional()
+    .trim()
+    .isLength({ min: 2, max: 100 })
+    .withMessage('Patient name must be between 2 and 100 characters')
+    .matches(/^[a-zA-Z\s]+$/)
+    .withMessage('Patient name can only contain letters and spaces'),
+  body('age')
+    .optional()
+    .isInt({ min: 0, max: 150 })
+    .withMessage('Age must be a number between 0 and 150'),
+  body('gender')
+    .optional()
+    .isIn(['male', 'female', 'other'])
+    .withMessage('Gender must be male, female, or other'),
+  handleValidationErrors
+];

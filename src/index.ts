@@ -8,6 +8,7 @@ import { errorHandler } from './middleware/errorHandler';
 import authRoutes from './routes/auth';
 import userRoutes from './routes/user';
 import diagnosisRoutes from './routes/diagnosis';
+import patientRoutes from './routes/patient';
 import { authenticateToken } from './middleware/auth';
 
 // Load environment variables
@@ -48,6 +49,7 @@ app.get('/health', (req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/users', authenticateToken, userRoutes);
 app.use('/api/diagnosis', diagnosisRoutes);
+app.use('/api/patients', patientRoutes);
 
 // 404 handler
 app.use('*', (req, res) => {

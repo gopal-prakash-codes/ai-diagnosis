@@ -23,11 +23,16 @@ const diagnosisSchema = new Schema<IDiagnosis>({
     required: [true, 'Conversation text is required'],
     trim: true
   },
-  symptoms: [{
-    type: String,
+  symptoms: {
+    type: [String],
     required: [true, 'At least one symptom is required'],
-    trim: true
-  }],
+    validate: {
+      validator: function(v: string[]) {
+        return Array.isArray(v) && v.length > 0;
+      },
+      message: 'At least one symptom is required'
+    }
+  },
   diagnosis: {
     type: String,
     required: [true, 'Diagnosis is required'],
