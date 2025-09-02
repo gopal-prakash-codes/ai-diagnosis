@@ -44,6 +44,15 @@ export const transcribe = async (req: Request, res: Response, next: NextFunction
     // Log for debugging
     const fileExtension = filePath.split('.').pop()?.toLowerCase();
     console.log(`Processing audio file: ${filePath}, size: ${stats.size} bytes, extension: ${fileExtension}`);
+    
+    // Additional validation for minimum file size
+    if (stats.size < 100) {
+      res.status(400).json({ 
+        success: false,
+        error: "Audio file too small - may be corrupted or contain no audio data" 
+      });
+      return;
+    }
 
     // Validate file extension
     const supportedFormats = ['flac', 'm4a', 'mp3', 'mp4', 'mpeg', 'mpga', 'oga', 'ogg', 'wav', 'webm'];
@@ -95,9 +104,10 @@ export const transcribe = async (req: Request, res: Response, next: NextFunction
     
     // Handle specific OpenAI errors
     if (err.status === 400) {
+      console.error('OpenAI 400 Error Details:', err.error || err.message);
       res.status(400).json({ 
         success: false,
-        error: "Invalid audio file format or content" 
+        error: `Audio processing failed: ${err.error?.message || 'Invalid audio format or corrupted file'}` 
       });
     } else if (err.status === 429) {
       res.status(429).json({ 
@@ -109,10 +119,16 @@ export const transcribe = async (req: Request, res: Response, next: NextFunction
         success: false,
         error: "OpenAI API authentication failed" 
       });
+    } else if (err.code === 'ENOENT') {
+      res.status(400).json({ 
+        success: false,
+        error: "Audio file not found or corrupted during upload" 
+      });
     } else {
+      console.error('Unexpected transcription error:', err);
       res.status(500).json({ 
         success: false,
-        error: "Transcription service temporarily unavailable" 
+        error: `Transcription failed: ${err.message || 'Unknown error'}` 
       });
     }
   }
