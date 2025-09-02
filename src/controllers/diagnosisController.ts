@@ -3,7 +3,120 @@ import { Patient } from '../models/Patient';
 import { Diagnosis } from '../models/Diagnosis';
 import { createError } from '../middleware/errorHandler';
 import OpenAI from 'openai';
+import fs from "fs";
 
+
+
+export const transcribe = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  let filePath: string | undefined;
+  
+  try {
+    // Validate OpenAI API key
+    if (!process.env.OPENAI_API_KEY) {
+      res.status(500).json({ 
+        success: false,
+        error: "OpenAI API key not configured" 
+      });
+      return;
+    }
+
+    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    filePath = req.file?.path;
+
+    if (!filePath) {
+      res.status(400).json({ 
+        success: false,
+        error: "No audio file uploaded" 
+      });
+      return;
+    }
+
+    // Check if file exists and has content
+    const stats = fs.statSync(filePath);
+    if (stats.size === 0) {
+      res.status(400).json({ 
+        success: false,
+        error: "Uploaded file is empty" 
+      });
+      return;
+    }
+
+    // Log for debugging
+    const fileExtension = filePath.split('.').pop()?.toLowerCase();
+    console.log(`Processing audio file: ${filePath}, size: ${stats.size} bytes, extension: ${fileExtension}`);
+
+    // Validate file extension
+    const supportedFormats = ['flac', 'm4a', 'mp3', 'mp4', 'mpeg', 'mpga', 'oga', 'ogg', 'wav', 'webm'];
+    if (!fileExtension || !supportedFormats.includes(fileExtension)) {
+      res.status(400).json({ 
+        success: false,
+        error: `Unsupported file format: ${fileExtension}. Supported formats: ${supportedFormats.join(', ')}` 
+      });
+      return;
+    }
+
+    const response = await client.audio.translations.create({
+      file: fs.createReadStream(filePath),
+      model: "whisper-1",
+      response_format: "text" // ensures plain text response
+    });
+
+    // Clean up temp file
+    fs.unlinkSync(filePath);
+
+    // Validate response
+    if (!response || typeof response !== 'string') {
+      res.status(500).json({ 
+        success: false,
+        error: "Invalid response from transcription service" 
+      });
+      return;
+    }
+
+    const transcriptText = (response as string).trim() || "";
+    
+    res.json({ 
+      success: true,
+      text: transcriptText,
+      message: transcriptText ? "Transcription successful" : "No speech detected"
+    });
+
+  } catch (err: any) {
+    // Clean up temp file on error
+    if (filePath && fs.existsSync(filePath)) {
+      try {
+        fs.unlinkSync(filePath);
+      } catch (cleanupErr) {
+        console.error("Failed to cleanup temp file:", cleanupErr);
+      }
+    }
+
+    console.error("Transcription error:", err);
+    
+    // Handle specific OpenAI errors
+    if (err.status === 400) {
+      res.status(400).json({ 
+        success: false,
+        error: "Invalid audio file format or content" 
+      });
+    } else if (err.status === 429) {
+      res.status(429).json({ 
+        success: false,
+        error: "Rate limit exceeded. Please try again later." 
+      });
+    } else if (err.status === 401) {
+      res.status(500).json({ 
+        success: false,
+        error: "OpenAI API authentication failed" 
+      });
+    } else {
+      res.status(500).json({ 
+        success: false,
+        error: "Transcription service temporarily unavailable" 
+      });
+    }
+  }
+};
 // Mock OpenAI function - replace with actual OpenAI SDK
 const analyzeConversationWithOpenAI = async (conversationText: string): Promise<{
   symptoms: string[];
