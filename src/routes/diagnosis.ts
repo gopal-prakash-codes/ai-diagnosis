@@ -14,11 +14,7 @@ router.use(authenticateToken);
 router.post('/analyze', analyzeConversation);
 router.get('/patient/:patientId', getDiagnosisHistory);
 router.get('/:id', getDiagnosisById);
-
-// Transcribe audio chunks for live transcription
 router.post('/transcribe', upload.single("file"), transcribe);
-
-// Transcribe audio with speaker diarization
 router.post('/transcribe-speakers', upload.single("file"), transcribeWithSpeakers);
 
 export default router;
