@@ -44,7 +44,8 @@ export const transcribe = async (req: Request, res: Response, next: NextFunction
 
     // Log for debugging
     const fileExtension = filePath.split('.').pop()?.toLowerCase();
-    console.log(`Processing audio file: ${filePath}, size: ${stats.size} bytes, extension: ${fileExtension}`);
+    console.log(`Processing audio file for translation to English: ${filePath}, size: ${stats.size} bytes, extension: ${fileExtension}`);
+    console.log('Input: Any language (Hindi, Kannada, English, etc.) → Output: English only');
     
     // Additional validation for minimum file size
     if (stats.size < 100) {
@@ -65,10 +66,13 @@ export const transcribe = async (req: Request, res: Response, next: NextFunction
       return;
     }
 
+    // Use translations.create to convert all languages (Hindi, Kannada, etc.) to English
+    // This allows multilingual input but ensures English-only output for the UI
     const response = await client.audio.translations.create({
       file: fs.createReadStream(filePath),
       model: "whisper-1",
-      response_format: "text" // ensures plain text response
+      response_format: "text" // Translates Hindi/Kannada/other languages to English
+      // Supports 99+ input languages, always outputs in English
     });
 
     // Clean up temp file
@@ -205,9 +209,10 @@ export const transcribeWithSpeakers = async (req: Request, res: Response, next: 
       return;
     }
 
-    console.log('Starting parallel processing: OpenAI Whisper (transcription) + Assembly AI (speaker detection)...');
+    console.log('Starting parallel processing: OpenAI Whisper (multilingual input → English output) + Assembly AI (speaker detection)...');
     console.log('File size:', stats.size, 'bytes');
     console.log('File extension:', fileExtension);
+    console.log('Language support: Understands Hindi, English, Kannada (99+ input languages) → Always outputs English');
     console.log('Assembly AI API Key configured:', !!process.env.ASSEMBLY_API_KEY);
     console.log('OpenAI API Key configured:', !!process.env.OPENAI_API_KEY);
 
@@ -222,19 +227,24 @@ export const transcribeWithSpeakers = async (req: Request, res: Response, next: 
           // Remove problematic parameters that cause "Invalid endpoint schema" error
           punctuate: true,
           format_text: true,
-          dual_channel: false
+          dual_channel: false,
+          // Assembly AI supports multiple languages but primarily English
+          // For Hindi/Kannada, Whisper will handle transcription, Assembly AI just for speaker detection
+          language_detection: true // Enable automatic language detection
         };
         
         console.log('Assembly AI config being sent:', JSON.stringify(config, null, 2));
         return await assemblyClient.transcripts.transcribe(config);
       })(),
       
-      // OpenAI Whisper for high-quality transcription with translation to English
+      // OpenAI Whisper for high-quality translation to English (from Hindi, Kannada, etc.)
       (async () => {
         return await openaiClient.audio.translations.create({
           file: fs.createReadStream(filePath),
           model: "whisper-1",
           response_format: "text"
+          // Translates any input language (Hindi, Kannada, etc.) to English output
+          // Supports 99+ input languages, always outputs in English
         });
       })()
     ]);
@@ -287,9 +297,9 @@ export const transcribeWithSpeakers = async (req: Request, res: Response, next: 
       
       res.json({ 
         success: true,
-        text: transcriptText, // High-quality Whisper transcription
-        speakers: alignedSpeakers, // Speaker timing from Assembly AI with Whisper text quality
-        message: `Hybrid success! Whisper transcription with ${[...new Set(alignedSpeakers.map(s => s.speaker))].length} speaker(s) detected by Assembly AI`
+        text: transcriptText, // High-quality Whisper translation to English
+        speakers: alignedSpeakers, // Speaker timing from Assembly AI with English text from Whisper
+        message: `Hybrid success! Whisper translation (multilingual→English) with ${[...new Set(alignedSpeakers.map(s => s.speaker))].length} speaker(s) detected by Assembly AI`
       });
     } else if (transcriptText) {
       // Fallback: Whisper transcription only (no speaker detection)
@@ -524,19 +534,56 @@ const alignWhisperWithSpeakers = (whisperText: string, assemblySegments: any[]) 
     return assemblySegments;
   }
 
-  // Use Assembly AI text for segments (more accurate for individual phrases)
-  // Keep Whisper text for overall transcript (better translation quality)
+  console.log('🔄 Aligning Whisper text with speaker segments...');
+  console.log('📝 Whisper text:', whisperText);
+  console.log('🎤 Assembly segments:', assemblySegments.length);
+
+  // If only one speaker segment, use the entire Whisper text
+  if (assemblySegments.length === 1) {
+    console.log('📌 Single speaker detected - using full Whisper translation');
+    return [{
+      ...assemblySegments[0],
+      text: whisperText.trim(), // Use the complete English translation
+      whisperBased: true,
+      assemblyAI: true
+    }];
+  }
+
+  // For multiple segments, we need to intelligently split the Whisper text
+  // based on timing proportions and sentence boundaries
+  const words = whisperText.trim().split(/\s+/);
+  const totalDuration = Math.max(...assemblySegments.map(s => s.end)) - Math.min(...assemblySegments.map(s => s.start));
   
-  // Assembly AI provides better phrase-level accuracy and timing
-  // Whisper provides better overall translation and language handling
-  
-  return assemblySegments.map(segment => ({
-    ...segment,
-    // Use Assembly AI text for segments - it's more accurate for individual phrases
-    text: segment.text, // Keep Assembly AI text
-    whisperBased: false, // Flag to indicate we're using Assembly AI text for segments
-    assemblyAI: true
-  }));
+  let wordIndex = 0;
+  const alignedSegments = assemblySegments.map((segment, index) => {
+    const segmentDuration = segment.end - segment.start;
+    const segmentProportion = segmentDuration / totalDuration;
+    
+    // Calculate how many words this segment should get based on duration
+    const wordsForSegment = Math.max(1, Math.round(words.length * segmentProportion));
+    
+    // Extract words for this segment
+    const segmentWords = words.slice(wordIndex, wordIndex + wordsForSegment);
+    wordIndex += segmentWords.length;
+    
+    // If this is the last segment, give it all remaining words
+    if (index === assemblySegments.length - 1 && wordIndex < words.length) {
+      segmentWords.push(...words.slice(wordIndex));
+    }
+    
+    const segmentText = segmentWords.join(' ');
+    
+    console.log(`🎯 Segment ${index + 1}: Speaker ${segment.speaker} → "${segmentText}"`);
+    
+    return {
+      ...segment,
+      text: segmentText, // Use proportionally allocated English text
+      whisperBased: true,
+      assemblyAI: true
+    };
+  });
+
+  return alignedSegments;
 };
 
 // Mock OpenAI function - replace with actual OpenAI SDK
