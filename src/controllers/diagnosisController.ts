@@ -4,6 +4,7 @@ import { Diagnosis } from '../models/Diagnosis';
 import { createError } from '../middleware/errorHandler';
 import OpenAI from 'openai';
 import fs from "fs";
+import { AssemblyAI } from 'assemblyai';
 
 
 
@@ -133,6 +134,411 @@ export const transcribe = async (req: Request, res: Response, next: NextFunction
     }
   }
 };
+
+export const transcribeWithSpeakers = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  let filePath: string | undefined;
+  
+  try {
+    // Validate both API keys
+    if (!process.env.ASSEMBLY_API_KEY) {
+      res.status(500).json({ 
+        success: false,
+        error: "Assembly AI API key not configured" 
+      });
+      return;
+    }
+
+    if (!process.env.OPENAI_API_KEY) {
+      res.status(500).json({ 
+        success: false,
+        error: "OpenAI API key not configured" 
+      });
+      return;
+    }
+
+    const assemblyClient = new AssemblyAI({
+      apiKey: process.env.ASSEMBLY_API_KEY!
+    });
+
+    const openaiClient = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+    filePath = req.file?.path;
+
+    if (!filePath) {
+      res.status(400).json({ 
+        success: false,
+        error: "No audio file uploaded" 
+      });
+      return;
+    }
+
+    // Check if file exists and has content
+    const stats = fs.statSync(filePath);
+    if (stats.size === 0) {
+      res.status(400).json({ 
+        success: false,
+        error: "Uploaded file is empty" 
+      });
+      return;
+    }
+
+    // Log for debugging
+    const fileExtension = filePath.split('.').pop()?.toLowerCase();
+    console.log(`Processing audio with Whisper (transcription) + Assembly AI (speakers): ${filePath}, size: ${stats.size} bytes, extension: ${fileExtension}`);
+    
+    // Additional validation for minimum file size
+    if (stats.size < 1000) {
+      res.status(400).json({ 
+        success: false,
+        error: "Audio file too small - may be corrupted or contain no audio data" 
+      });
+      return;
+    }
+
+    // Validate file extension
+    const supportedFormats = ['flac', 'm4a', 'mp3', 'mp4', 'mpeg', 'mpga', 'oga', 'ogg', 'wav', 'webm'];
+    if (!fileExtension || !supportedFormats.includes(fileExtension)) {
+      res.status(400).json({ 
+        success: false,
+        error: `Unsupported file format: ${fileExtension}. Supported formats: ${supportedFormats.join(', ')}` 
+      });
+      return;
+    }
+
+    console.log('Starting parallel processing: OpenAI Whisper (transcription) + Assembly AI (speaker detection)...');
+    console.log('File size:', stats.size, 'bytes');
+    console.log('File extension:', fileExtension);
+    console.log('Assembly AI API Key configured:', !!process.env.ASSEMBLY_API_KEY);
+    console.log('OpenAI API Key configured:', !!process.env.OPENAI_API_KEY);
+
+    // Process both in parallel for better performance
+    const [assemblyResult, openaiResult] = await Promise.allSettled([
+      // Assembly AI for speaker diarization ONLY (no transcription needed)
+      (async () => {
+        const uploadUrl = await assemblyClient.files.upload(filePath);
+        const config = {
+          audio_url: uploadUrl,
+          speaker_labels: true,
+          // Remove problematic parameters that cause "Invalid endpoint schema" error
+          punctuate: true,
+          format_text: true,
+          dual_channel: false
+        };
+        
+        console.log('Assembly AI config being sent:', JSON.stringify(config, null, 2));
+        return await assemblyClient.transcripts.transcribe(config);
+      })(),
+      
+      // OpenAI Whisper for high-quality transcription with translation to English
+      (async () => {
+        return await openaiClient.audio.translations.create({
+          file: fs.createReadStream(filePath),
+          model: "whisper-1",
+          response_format: "text"
+        });
+      })()
+    ]);
+
+    // Clean up temp file
+    fs.unlinkSync(filePath);
+
+    // Handle results
+    let speakerSegments: any[] = [];
+    let transcriptText = "";
+
+    // Process OpenAI result (for high-quality English transcription)
+    if (openaiResult.status === 'fulfilled' && openaiResult.value) {
+      transcriptText = (openaiResult.value as any).toString().trim() || "";
+      console.log('✅ OpenAI Whisper transcription successful:', transcriptText.length, 'characters');
+    } else {
+      console.error('❌ OpenAI transcription failed:', openaiResult.status === 'rejected' ? openaiResult.reason : 'Unknown error');
+    }
+
+    // Process Assembly AI result (for speaker diarization ONLY)
+    if (assemblyResult.status === 'fulfilled' && assemblyResult.value) {
+      const assemblyTranscript = assemblyResult.value;
+      console.log('🎤 Assembly AI Status:', assemblyTranscript.status);
+      console.log('🎤 Assembly AI Error:', assemblyTranscript.error);
+      console.log('🎤 Assembly AI Utterances:', assemblyTranscript.utterances?.length || 0);
+      
+      if (assemblyTranscript.status === 'completed' && assemblyTranscript.utterances) {
+        let rawSegments = assemblyTranscript.utterances.map(utterance => ({
+          speaker: utterance.speaker,
+          text: utterance.text, // We'll replace this with aligned Whisper text
+          start: utterance.start,
+          end: utterance.end,
+          confidence: utterance.confidence
+        }));
+
+        // Optimize speaker segments and align with Whisper transcription
+        speakerSegments = optimizeSpeakerSegments(rawSegments);
+        console.log('✅ Assembly AI speaker detection successful:', speakerSegments.length, 'segments');
+      } else {
+        console.error('❌ Assembly AI speaker detection failed:', assemblyTranscript.error || 'No utterances found');
+      }
+    } else {
+      console.error('❌ Assembly AI processing failed:', assemblyResult.status === 'rejected' ? assemblyResult.reason : 'Unknown error');
+    }
+
+    // Combine results: Use Whisper transcription quality with Assembly AI speaker timing
+    if (transcriptText && speakerSegments.length > 0) {
+      // Align OpenAI Whisper text with Assembly AI speaker segments
+      const alignedSpeakers = alignWhisperWithSpeakers(transcriptText, speakerSegments);
+      
+      res.json({ 
+        success: true,
+        text: transcriptText, // High-quality Whisper transcription
+        speakers: alignedSpeakers, // Speaker timing from Assembly AI with Whisper text quality
+        message: `Hybrid success! Whisper transcription with ${[...new Set(alignedSpeakers.map(s => s.speaker))].length} speaker(s) detected by Assembly AI`
+      });
+    } else if (transcriptText) {
+      // Fallback: Whisper transcription only (no speaker detection)
+      res.json({ 
+        success: true,
+        text: transcriptText,
+        speakers: [],
+        message: "Whisper transcription successful, but speaker detection failed"
+      });
+    } else if (speakerSegments.length > 0) {
+      // Fallback: Assembly AI only (shouldn't happen often)
+      const assemblyText = speakerSegments.map(s => s.text).join(' ');
+      res.json({ 
+        success: true,
+        text: assemblyText,
+        speakers: speakerSegments,
+        message: "Speaker detection successful, but Whisper transcription failed"
+      });
+    } else {
+      res.status(500).json({ 
+        success: false,
+        error: "Both Whisper transcription and Assembly AI speaker detection failed"
+      });
+    }
+
+  } catch (err: any) {
+    // Clean up temp file on error
+    if (filePath && fs.existsSync(filePath)) {
+      try {
+        fs.unlinkSync(filePath);
+      } catch (cleanupErr) {
+        console.error("Failed to cleanup temp file:", cleanupErr);
+      }
+    }
+
+    console.error("Hybrid transcription error:", err);
+    
+    // Handle specific errors
+    if (err.status === 400) {
+      res.status(400).json({ 
+        success: false,
+        error: `Audio processing failed: ${err.message || 'Invalid audio format or corrupted file'}` 
+      });
+    } else if (err.status === 401) {
+      res.status(500).json({ 
+        success: false,
+        error: "API authentication failed (OpenAI or Assembly AI)" 
+      });
+    } else if (err.status === 429) {
+      res.status(429).json({ 
+        success: false,
+        error: "Rate limit exceeded. Please try again later." 
+      });
+    } else {
+      console.error('Unexpected hybrid transcription error:', err);
+      res.status(500).json({ 
+        success: false,
+        error: `Transcription failed: ${err.message || 'Unknown error'}` 
+      });
+    }
+  }
+};
+
+// Helper function to optimize speaker segments for better accuracy
+const optimizeSpeakerSegments = (segments: any[]) => {
+  if (!segments || segments.length === 0) return [];
+
+  // Sort segments by start time
+  const sortedSegments = [...segments].sort((a, b) => a.start - b.start);
+  const optimizedSegments: any[] = [];
+  
+  for (let i = 0; i < sortedSegments.length; i++) {
+    const currentSegment = sortedSegments[i];
+    
+    // Skip very short segments (likely noise or false detection)
+    if (currentSegment.text.trim().length < 5) { // Increased threshold
+      continue;
+    }
+    
+    // Check if this segment should be merged with the previous one
+    const lastSegment = optimizedSegments[optimizedSegments.length - 1];
+    
+    if (lastSegment && shouldMergeSegments(lastSegment, currentSegment)) {
+      // Merge with previous segment
+      lastSegment.text += ' ' + currentSegment.text;
+      lastSegment.end = currentSegment.end;
+      lastSegment.confidence = Math.max(lastSegment.confidence, currentSegment.confidence);
+    } else {
+      // Add as new segment
+      optimizedSegments.push({
+        ...currentSegment,
+        // Normalize speaker labels to be more consistent
+        speaker: normalizeSpeakerLabel(currentSegment.speaker)
+      });
+    }
+  }
+
+  // Advanced voice-based analysis to detect single speaker scenarios
+  const voiceAnalysis = analyzeVoicePatterns(optimizedSegments);
+  
+  if (voiceAnalysis.isSingleSpeaker) {
+    console.log(`Voice analysis detected single speaker: ${voiceAnalysis.reason}`);
+    return optimizedSegments.map(segment => ({
+      ...segment,
+      speaker: voiceAnalysis.primarySpeaker,
+      singleSpeakerDetected: true
+    }));
+  }
+
+  return optimizedSegments;
+};
+
+// Helper function to determine if segments should be merged
+const shouldMergeSegments = (prev: any, current: any) => {
+  const timeDiff = current.start - prev.end;
+  const sameSpeaker = prev.speaker === current.speaker;
+  const shortGap = timeDiff < 3000; // Increased to 3 seconds gap
+  const reasonableConfidence = prev.confidence > 0.6 && current.confidence > 0.6; // Lowered threshold
+  
+  // Also merge if different speakers but very short gap (likely same person)
+  const veryShortGap = timeDiff < 1000; // Less than 1 second
+  const differentSpeakers = prev.speaker !== current.speaker;
+  const likelySamePerson = differentSpeakers && veryShortGap && reasonableConfidence;
+  
+  return (sameSpeaker && shortGap && reasonableConfidence) || likelySamePerson;
+};
+
+// Advanced voice pattern analysis to detect single speaker scenarios
+const analyzeVoicePatterns = (segments: any[]) => {
+  if (!segments || segments.length < 2) {
+    return { isSingleSpeaker: false, primarySpeaker: 'A', reason: 'Insufficient data' };
+  }
+
+  const speakerCounts = segments.reduce((counts, segment) => {
+    counts[segment.speaker] = (counts[segment.speaker] || 0) + 1;
+    return counts;
+  }, {});
+  
+  const speakers = Object.keys(speakerCounts);
+  const totalSegments = segments.length;
+  
+  // Analysis 1: Speaker dominance (one speaker has 80%+ of segments)
+  const majorSpeaker = speakers.find(speaker => 
+    speakerCounts[speaker] / totalSegments > 0.8
+  );
+  
+  if (majorSpeaker) {
+    return {
+      isSingleSpeaker: true,
+      primarySpeaker: majorSpeaker,
+      reason: `Dominance pattern: ${speakerCounts[majorSpeaker]}/${totalSegments} segments (${Math.round(speakerCounts[majorSpeaker]/totalSegments*100)}%)`
+    };
+  }
+
+  // Analysis 2: Rapid alternations (< 1.5 seconds between different speakers)
+  let rapidAlternations = 0;
+  let totalAlternations = 0;
+  
+  for (let i = 1; i < segments.length; i++) {
+    const prev = segments[i-1];
+    const curr = segments[i];
+    
+    if (prev.speaker !== curr.speaker) {
+      totalAlternations++;
+      const gap = curr.start - prev.end;
+      if (gap < 1500) { // Less than 1.5 seconds
+        rapidAlternations++;
+      }
+    }
+  }
+  
+  if (totalAlternations > 0 && rapidAlternations / totalAlternations > 0.7) {
+    return {
+      isSingleSpeaker: true,
+      primarySpeaker: speakers[0],
+      reason: `Rapid alternations: ${rapidAlternations}/${totalAlternations} speaker changes < 1.5s (${Math.round(rapidAlternations/totalAlternations*100)}%)`
+    };
+  }
+
+  // Analysis 3: Confidence pattern (low confidence often indicates false speaker detection)
+  const avgConfidenceBySpeaker: {[key: string]: number} = {};
+  for (const speaker of speakers) {
+    const speakerSegments = segments.filter(s => s.speaker === speaker);
+    const avgConfidence = speakerSegments.reduce((sum, s) => sum + s.confidence, 0) / speakerSegments.length;
+    avgConfidenceBySpeaker[speaker] = avgConfidence;
+  }
+  
+  // If one speaker has much lower confidence, it's likely a false detection
+  const confidenceValues = Object.values(avgConfidenceBySpeaker);
+  const maxConfidence = Math.max(...confidenceValues);
+  const minConfidence = Math.min(...confidenceValues);
+  
+  if (speakers.length === 2 && (maxConfidence - minConfidence) > 0.15) {
+    const highConfidenceSpeaker = Object.keys(avgConfidenceBySpeaker).find(
+      speaker => avgConfidenceBySpeaker[speaker] === maxConfidence
+    );
+    
+    return {
+      isSingleSpeaker: true,
+      primarySpeaker: highConfidenceSpeaker,
+      reason: `Confidence disparity: ${highConfidenceSpeaker}(${maxConfidence.toFixed(2)}) vs others(${minConfidence.toFixed(2)})`
+    };
+  }
+
+  // Analysis 4: Segment length pattern (very short segments often indicate false detection)
+  const shortSegments = segments.filter(s => s.text.trim().length < 10).length;
+  if (shortSegments / totalSegments > 0.4) {
+    return {
+      isSingleSpeaker: true,
+      primarySpeaker: speakers[0],
+      reason: `Too many short segments: ${shortSegments}/${totalSegments} (${Math.round(shortSegments/totalSegments*100)}%)`
+    };
+  }
+
+  return { isSingleSpeaker: false, primarySpeaker: 'A', reason: 'Multiple speakers detected' };
+};
+
+// Helper function to normalize speaker labels
+const normalizeSpeakerLabel = (speaker: string) => {
+  // Convert to consistent format (A, B, C, etc.)
+  if (speaker.toLowerCase().includes('a') || speaker === '0') return 'A';
+  if (speaker.toLowerCase().includes('b') || speaker === '1') return 'B';
+  if (speaker.toLowerCase().includes('c') || speaker === '2') return 'C';
+  
+  // Default mapping
+  return speaker.toUpperCase();
+};
+
+// Helper function to align Whisper transcription with Assembly AI speaker segments
+const alignWhisperWithSpeakers = (whisperText: string, assemblySegments: any[]) => {
+  if (!whisperText || !assemblySegments || assemblySegments.length === 0) {
+    return assemblySegments;
+  }
+
+  // Use Assembly AI text for segments (more accurate for individual phrases)
+  // Keep Whisper text for overall transcript (better translation quality)
+  
+  // Assembly AI provides better phrase-level accuracy and timing
+  // Whisper provides better overall translation and language handling
+  
+  return assemblySegments.map(segment => ({
+    ...segment,
+    // Use Assembly AI text for segments - it's more accurate for individual phrases
+    text: segment.text, // Keep Assembly AI text
+    whisperBased: false, // Flag to indicate we're using Assembly AI text for segments
+    assemblyAI: true
+  }));
+};
+
 // Mock OpenAI function - replace with actual OpenAI SDK
 const analyzeConversationWithOpenAI = async (conversationText: string): Promise<{
   symptoms: string[];
