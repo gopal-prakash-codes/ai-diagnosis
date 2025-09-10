@@ -6,6 +6,7 @@ export interface IDiagnosis extends Document {
   conversationText: string;
   symptoms: string[];
   diagnosis: string;
+  treatment?: string;
   confidence?: number;
   doctor?: string;
   createdAt: Date;
@@ -37,6 +38,11 @@ const diagnosisSchema = new Schema<IDiagnosis>({
     type: String,
     required: [true, 'Diagnosis is required'],
     trim: true
+  },
+  treatment: {
+    type: String,
+    trim: true,
+    default: null
   },
   confidence: {
     type: Number,

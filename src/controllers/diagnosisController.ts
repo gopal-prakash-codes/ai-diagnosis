@@ -742,6 +742,8 @@ const contentBasedAlignment = (fullWhisperText: string, whisperSentences: string
 const analyzeConversationWithOpenAI = async (conversationText: string): Promise<{
   symptoms: string[];
   diagnosis: string;
+  diagnosisData: Array<{condition: string, confidence: number}>;
+  treatment: string;
   confidence: number;
   summary: string;
 }> => {
@@ -756,14 +758,24 @@ const analyzeConversationWithOpenAI = async (conversationText: string): Promise<
       
       Instructions:
       1. Extract and list all symptoms mentioned in the conversation.
-      2. If the doctor provides a diagnosis in the conversation, capture it exactly as stated. 
+      2. If the doctor provides a diagnosis in the conversation, capture it exactly as stated with high confidence. 
          - If no diagnosis is explicitly provided by the doctor, generate AI-suggested possible diagnoses based on the symptoms.
-      3. Write a brief, concise summary of the conversation.
+         - Provide individual confidence scores (0-100) for each possible diagnosis.
+      3. Provide appropriate treatment recommendations based on the diagnosis and symptoms.
+      4. Assign an overall confidence score (0-100) based on the clarity of symptoms and diagnosis.
+      5. Write a brief, concise summary of the conversation.
       
       Output JSON structure:
       {
         "symptoms": [ "symptom1", "symptom2", ... ],
-        "possible_diagnosis": "single diagnosis as string",
+        "possible_diagnosis": [
+          {
+            "condition": "diagnosis name",
+            "confidence": 85
+          }
+        ],
+        "possible_treatment": "single treatment recommendation as string",
+        "overall_confidence": 85,
         "summary": "One or two sentence summary."
       }
       
@@ -786,26 +798,39 @@ const analyzeConversationWithOpenAI = async (conversationText: string): Promise<
 
     const analysis = JSON.parse(responseContent);
     
+    let diagnosisData = [];
     let diagnosisString = 'Diagnosis pending further analysis';
     
     if (analysis.possible_diagnosis) {
       if (Array.isArray(analysis.possible_diagnosis)) {
-        diagnosisString = analysis.possible_diagnosis.join(', ');
+        if (analysis.possible_diagnosis.length > 0 && typeof analysis.possible_diagnosis[0] === 'object') {
+          diagnosisData = analysis.possible_diagnosis;
+          diagnosisString = analysis.possible_diagnosis.map((d: any) => d.condition).join(', ');
+        } else {
+          diagnosisString = analysis.possible_diagnosis.join(', ');
+          diagnosisData = analysis.possible_diagnosis.map((d: any) => ({ condition: d, confidence: 50 }));
+        }
       } else if (typeof analysis.possible_diagnosis === 'string') {
         diagnosisString = analysis.possible_diagnosis;
+        diagnosisData = [{ condition: analysis.possible_diagnosis, confidence: 50 }];
       }
     }
     
     return {
       symptoms: Array.isArray(analysis.symptoms) ? analysis.symptoms : ['Symptoms not clearly identified'],
       diagnosis: diagnosisString,
-      confidence: typeof analysis.confidence === 'number' ? Math.max(0, Math.min(100, analysis.confidence)) : 50,
+      diagnosisData: diagnosisData,
+      treatment: analysis.possible_treatment || 'Treatment recommendations pending further evaluation',
+      confidence: typeof analysis.overall_confidence === 'number' ? Math.max(0, Math.min(100, analysis.overall_confidence)) : 
+                  typeof analysis.confidence === 'number' ? Math.max(0, Math.min(100, analysis.confidence)) : 50,
       summary: analysis.summary || 'Analysis completed but summary not available'
     };
   } catch (error) {
     return {
       symptoms: ['Analysis failed - manual review required'],
       diagnosis: 'Diagnosis pending - AI analysis unavailable',
+      diagnosisData: [{ condition: 'Diagnosis pending - AI analysis unavailable', confidence: 0 }],
+      treatment: 'Treatment recommendations unavailable - manual review required',
       confidence: 0,
       summary: 'AI analysis service temporarily unavailable. Please review manually.'
     };
@@ -855,6 +880,7 @@ export const analyzeConversation = async (
       conversationText,
       symptoms: analysis.symptoms,
       diagnosis: analysis.diagnosis,
+      treatment: analysis.treatment,
       confidence: analysis.confidence,
       doctor: req.user?.email || 'AI System'
     });
