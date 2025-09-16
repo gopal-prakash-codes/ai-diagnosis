@@ -5,6 +5,7 @@ import { createError } from '../middleware/errorHandler';
 import OpenAI from 'openai';
 import fs from "fs";
 import { AssemblyAI } from 'assemblyai';
+import crypto from 'crypto';
 
 export const transcribe = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   let filePath: string | undefined;
@@ -586,10 +587,34 @@ const analyzeVoicePatterns = (segments: any[]) => {
   return { isSingleSpeaker: false, primarySpeaker: 'A', reason: 'Multiple speakers detected' };
 };
 
+const createConversationHash = (conversationText: string): string => {
+  const normalizedContent = conversationText
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+  
+  return crypto.createHash('sha256').update(normalizedContent).digest('hex').substring(0, 16);
+};
+
+const isConversationExtension = (previousConversation: string, newConversation: string): boolean => {
+  if (!previousConversation || !newConversation) {
+    return false;
+  }
+  const normalizedPrevious = previousConversation.trim().replace(/\s+/g, ' ');
+  const normalizedNew = newConversation.trim().replace(/\s+/g, ' ');
+  if (normalizedNew.length <= normalizedPrevious.length) {
+    return false;
+  }
+  const similarity = normalizedNew.includes(normalizedPrevious) || 
+                    normalizedNew.startsWith(normalizedPrevious.substring(0, Math.min(200, normalizedPrevious.length)));
+  
+  return similarity;
+};
+
+
 const normalizeSpeakerLabel = (speaker: string) => {
   if (speaker.toLowerCase().includes('a') || speaker === '0') return 'A';
   if (speaker.toLowerCase().includes('b') || speaker === '1') return 'B';
-  if (speaker.toLowerCase().includes('c') || speaker === '2') return 'C';
 
   return speaker.toUpperCase();
 };
@@ -739,7 +764,10 @@ const contentBasedAlignment = (fullWhisperText: string, whisperSentences: string
   });
 };
 
-const analyzeConversationWithOpenAI = async (conversationText: string): Promise<{
+const analyzeConversationWithOpenAI = async (
+  conversationText: string, 
+  previousDiagnosis?: any
+): Promise<{
   symptoms: string[];
   diagnosis: string;
   diagnosisData: Array<{ condition: string, confidence: number }>;
@@ -747,47 +775,103 @@ const analyzeConversationWithOpenAI = async (conversationText: string): Promise<
   confidence: number;
   summary: string;
 }> => {
-  try {
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-    const completion = await openai.chat.completions.create({
-      model: "gpt-5",
-      messages: [
+  if (!process.env.OPENAI_API_KEY) {
+    console.error('OpenAI API key is not configured');
+    return {
+      symptoms: ['Configuration error - OpenAI API key missing'],
+      diagnosis: 'System configuration error - unable to analyze',
+      diagnosisData: [{ condition: 'System configuration error', confidence: 0 }],
+      treatment: 'System configuration required',
+      confidence: 0,
+      summary: 'OpenAI API key not configured in environment variables.'
+    };
+  }
+
+  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const modelsToTry = ["gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"];
+  const conversationHash = createConversationHash(conversationText);
+  
+  
+  const seed = parseInt(conversationHash.substring(0, 8), 16) % 1000000;
+  
+  for (const model of modelsToTry) {
+    try {
+      console.log(`Attempting to use model: ${model} with seed: ${seed}`);
+      const completion = await openai.chat.completions.create({
+        model: model,
+        temperature: 0.0, 
+        top_p: 0.1, 
+        frequency_penalty: 0, 
+        presence_penalty: 0, 
+        seed: seed, 
+        max_tokens: 2000, 
+        messages: [
         {
           role: "system",
-          content: `You are a medical AI assistant. Your task is to analyze the provided doctor-patient conversation and return the findings strictly in JSON format.
+          content: `You are a medical AI assistant. Analyze the doctor-patient conversation and return findings in JSON format.
 
-Instructions:
-Extract and list all symptoms mentioned in the conversation.
-If the doctor provides a diagnosis in the conversation, capture it exactly as stated with high confidence.
-If no diagnosis is explicitly provided by the doctor, generate AI-suggested possible diagnoses based on the symptoms.
-Provide individual confidence scores (0–100) for each possible diagnosis.
-Provide appropriate treatment recommendations based on the diagnosis and symptoms.
-Assign an overall confidence score (0–100) based on the clarity of symptoms and diagnosis.
-Write a brief, concise summary of the conversation.
-Output JSON structure:
+CORE RULES:
+- Extract all current symptoms mentioned in the conversation
+- If doctor provides diagnosis, use it exactly as stated with high confidence
+- If diagnosis is ruled out by tests/doctor, suggest alternative diagnoses based on symptoms
+- Always provide at least one possible diagnosis unless no symptoms are present
+- Use consistent medical terminology
+
+ELIMINATION HANDLING:
+- If previous diagnosis is ruled out by tests/examination, suggest alternative diagnoses for the same symptoms
+- Example: "Anemia ruled out by normal hemoglobin" → suggest other causes of fatigue/weakness
+- NEVER return empty diagnosis list - always provide alternative possibilities
+- Update treatment for new suspected conditions
+
+CONFIDENCE SCORING:
+- 10-30: Very unlikely but possible
+- 40-60: Moderate likelihood  
+- 70-90: Highly likely
+- 95+: Confirmed by tests or doctor
+
+JSON FORMAT:
 {
-  "symptoms": [ "symptom1", "symptom2", ... ],
-  "possible_diagnosis": [
-    {
-      "condition": "diagnosis name",
-      "confidence": 85
-    }
-  ],
-  "possible_treatment": "single treatment recommendation as string",
+  "symptoms": ["symptom1", "symptom2"],
+  "possible_diagnosis": [{"condition": "name", "confidence": 85}],
+  "possible_treatment": "treatment recommendation",
   "overall_confidence": 85,
-  "summary": "One or two sentence summary."
+  "summary": "consultation summary"
 }
 
-Rules:
-Only return valid JSON, no extra text or explanations.
-If doctor's diagnosis is given, do not overwrite or alter it—just record it exactly as stated.
-Move with Elimination means If a user initially presents symptoms but later denies them or their medical reports contradict those symptoms, update the symptoms, diagnosis, and treatment accordingly as the conversation progresses. Only consider the most accurate and current information when generating your output.`},
+IMPORTANT: Always include at least one condition in possible_diagnosis unless no symptoms exist. Even when conditions are ruled out, suggest alternative diagnoses for the remaining symptoms.
+
+Return only valid JSON.
+`},
         {
           role: "user",
-          content: conversationText
+          content: previousDiagnosis ? 
+            `PREVIOUS MEDICAL CONSULTATION CONTEXT:
+Previous symptoms identified: ${previousDiagnosis.symptoms?.join(', ') || 'None'}
+Previous diagnosis: ${previousDiagnosis.diagnosis || 'None'}
+Previous confidence: ${previousDiagnosis.confidence || 'Unknown'}%
+Previous treatment plan: ${previousDiagnosis.treatment || 'None'}
+
+CONVERSATION EXTENSION ANALYSIS:
+The conversation below is an extension of a previous consultation. You must:
+
+1. COMPARE the new conversation with previous findings
+2. IDENTIFY what has changed, been added, or been clarified
+3. UPDATE diagnosis based on new information:
+   - If test results contradict previous diagnosis → Remove/modify diagnosis
+   - If new symptoms appear → Add to symptom list
+   - If patient clarifies/corrects previous info → Update accordingly
+   - If new information supports previous diagnosis → Increase confidence
+   - If treatment shows improvement → Note in summary
+
+4. MAINTAIN continuity while being responsive to new information
+
+FULL EXTENDED CONVERSATION:
+${conversationText}
+
+Focus on what's NEW or DIFFERENT from the previous consultation and how it affects the medical assessment.` 
+            : conversationText
         }
       ]
-
     });
 
     const responseContent = completion.choices[0].message.content;
@@ -795,6 +879,7 @@ Move with Elimination means If a user initially presents symptoms but later deni
       throw new Error('No response from OpenAI');
     }
 
+    console.log(`Successfully used model: ${model}`);
     const analysis = JSON.parse(responseContent);
 
     let diagnosisData = [];
@@ -803,8 +888,15 @@ Move with Elimination means If a user initially presents symptoms but later deni
     if (analysis.possible_diagnosis) {
       if (Array.isArray(analysis.possible_diagnosis)) {
         if (analysis.possible_diagnosis.length > 0 && typeof analysis.possible_diagnosis[0] === 'object') {
-          diagnosisData = analysis.possible_diagnosis;
-          diagnosisString = analysis.possible_diagnosis.map((d: any) => d.condition).join(', ');
+          diagnosisData = analysis.possible_diagnosis.filter((d: any) => 
+            d.confidence && d.confidence > 0
+          );
+          
+          if (diagnosisData.length === 0) {
+            diagnosisData = [{ condition: 'Further investigation needed', confidence: 30 }];
+          }
+          
+          diagnosisString = diagnosisData.map((d: any) => d.condition).join(', ');
         } else {
           diagnosisString = analysis.possible_diagnosis.join(', ');
           diagnosisData = analysis.possible_diagnosis.map((d: any) => ({ condition: d, confidence: 50 }));
@@ -815,7 +907,7 @@ Move with Elimination means If a user initially presents symptoms but later deni
       }
     }
 
-    return {
+    const result = {
       symptoms: Array.isArray(analysis.symptoms) ? analysis.symptoms : ['Symptoms not clearly identified'],
       diagnosis: diagnosisString,
       diagnosisData: diagnosisData,
@@ -824,16 +916,37 @@ Move with Elimination means If a user initially presents symptoms but later deni
         typeof analysis.confidence === 'number' ? Math.max(0, Math.min(100, analysis.confidence)) : 50,
       summary: analysis.summary || 'Analysis completed but summary not available'
     };
-  } catch (error) {
-    return {
-      symptoms: ['Analysis failed - manual review required'],
-      diagnosis: 'Diagnosis pending - AI analysis unavailable',
-      diagnosisData: [{ condition: 'Diagnosis pending - AI analysis unavailable', confidence: 0 }],
-      treatment: 'Treatment recommendations unavailable - manual review required',
-      confidence: 0,
-      summary: 'AI analysis service temporarily unavailable. Please review manually.'
-    };
+
+    console.log(`Generated fresh analysis for conversation`);
+
+    return result;
+    
+    } catch (modelError: any) {
+      console.error(`Model ${model} failed:`, {
+        message: modelError.message,
+        status: modelError.status,
+        code: modelError.code,
+        type: modelError.type
+      });
+      
+      if (modelError.message?.includes('model') || 
+          modelError.message?.includes('does not exist') ||
+          modelError.status === 404 || 
+          modelError.status === 400) {
+        continue; 
+      }
+      throw modelError;
+    }
   }
+  console.error(`All models failed. Tried: ${modelsToTry.join(', ')}`);
+  return {
+    symptoms: ['Analysis failed - manual review required'],
+    diagnosis: 'Diagnosis pending - AI analysis unavailable',
+    diagnosisData: [{ condition: 'Diagnosis pending - AI analysis unavailable', confidence: 0 }],
+    treatment: 'Treatment recommendations unavailable - manual review required',
+    confidence: 0,
+    summary: `AI analysis service temporarily unavailable. Tried models: ${modelsToTry.join(', ')}. Please review manually.`
+  };
 };
 
 export const analyzeConversation = async (
@@ -842,7 +955,7 @@ export const analyzeConversation = async (
   next: NextFunction
 ): Promise<void> => {
   try {
-    const { patientId, conversationText } = req.body;
+    const { patientId, conversationText, updateExisting } = req.body;
 
     if (!patientId || !conversationText) {
       res.status(400).json({
@@ -861,9 +974,63 @@ export const analyzeConversation = async (
       return;
     }
 
-    const analysis = await analyzeConversationWithOpenAI(conversationText);
+    const exactMatch = await Diagnosis.findOne({
+      patient: patientId,
+      conversationText: conversationText
+    }).sort({ createdAt: -1 });
 
-    if (!analysis.diagnosis || typeof analysis.diagnosis !== 'string' || !analysis.symptoms || analysis.symptoms.length === 0) {
+    if (exactMatch) {
+      console.log(`Found identical conversation, returning existing diagnosis ID: ${exactMatch._id}`);
+      res.status(200).json({
+        success: true,
+        message: 'Using existing diagnosis for identical conversation',
+        data: {
+          analysis: {
+            symptoms: exactMatch.symptoms,
+            diagnosis: exactMatch.diagnosis,
+            diagnosisData: [{ condition: exactMatch.diagnosis, confidence: exactMatch.confidence || 50 }],
+            treatment: exactMatch.treatment || 'Treatment recommendations pending',
+            confidence: exactMatch.confidence || 50,
+            summary: `Using existing analysis for identical conversation. Diagnosis: ${exactMatch.diagnosis}`
+          },
+          diagnosisId: exactMatch._id,
+          patient: {
+            id: patient._id,
+            name: patient.name,
+            age: patient.age,
+            gender: patient.gender
+          }
+        }
+      });
+      return;
+    }
+
+    let previousDiagnosis = null;
+    if (updateExisting) {
+      const recentDiagnosis = await Diagnosis.findOne({ 
+        patient: patientId 
+      }).sort({ createdAt: -1 });
+      
+      if (recentDiagnosis) {
+        previousDiagnosis = {
+          symptoms: recentDiagnosis.symptoms,
+          diagnosis: recentDiagnosis.diagnosis,
+          confidence: recentDiagnosis.confidence,
+          treatment: recentDiagnosis.treatment,
+          previousConversation: recentDiagnosis.conversationText
+        };
+        
+        console.log(`Using previous diagnosis context for conversation extension:`, {
+          previousSymptoms: recentDiagnosis.symptoms,
+          previousDiagnosis: recentDiagnosis.diagnosis,
+          previousConfidence: recentDiagnosis.confidence
+        });
+      }
+    }
+
+    const analysis = await analyzeConversationWithOpenAI(conversationText, previousDiagnosis);
+
+    if (typeof analysis.diagnosis !== 'string' || !analysis.symptoms || analysis.symptoms.length === 0) {
       res.status(500).json({
         success: false,
         message: 'AI analysis failed to provide valid diagnosis or symptoms',
@@ -874,17 +1041,58 @@ export const analyzeConversation = async (
       return;
     }
 
-    const diagnosis = new Diagnosis({
-      patient: patientId,
-      conversationText,
-      symptoms: analysis.symptoms,
-      diagnosis: analysis.diagnosis,
-      treatment: analysis.treatment,
-      confidence: analysis.confidence,
-      doctor: req.user?.email || 'AI System'
-    });
+    let diagnosis;
+    if (updateExisting) {
+      const recentDiagnosis = await Diagnosis.findOne({ 
+        patient: patientId 
+      }).sort({ createdAt: -1 });
+      
+      if (recentDiagnosis && isConversationExtension(recentDiagnosis.conversationText, conversationText)) {
+        diagnosis = await Diagnosis.findByIdAndUpdate(
+          recentDiagnosis._id,
+          {
+            conversationText,
+            symptoms: analysis.symptoms,
+            diagnosis: analysis.diagnosis,
+            treatment: analysis.treatment,
+            confidence: analysis.confidence,
+            doctor: req.user?.email || 'AI System',
+            updatedAt: new Date()
+          },
+          { new: true }
+        );
+      } else {
+        diagnosis = new Diagnosis({
+          patient: patientId,
+          conversationText,
+          symptoms: analysis.symptoms,
+          diagnosis: analysis.diagnosis,
+          treatment: analysis.treatment,
+          confidence: analysis.confidence,
+          doctor: req.user?.email || 'AI System'
+        });
+        await diagnosis.save();
+      }
+    } else {
+      diagnosis = new Diagnosis({
+        patient: patientId,
+        conversationText,
+        symptoms: analysis.symptoms,
+        diagnosis: analysis.diagnosis,
+        treatment: analysis.treatment,
+        confidence: analysis.confidence,
+        doctor: req.user?.email || 'AI System'
+      });
+      await diagnosis.save();
+    }
 
-    await diagnosis.save();
+    if (!diagnosis) {
+      res.status(500).json({
+        success: false,
+        message: 'Failed to create or update diagnosis record'
+      });
+      return;
+    }
 
     res.status(200).json({
       success: true,
