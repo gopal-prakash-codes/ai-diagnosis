@@ -769,6 +769,7 @@ const analyzeConversationWithOpenAI = async (
   previousDiagnosis?: any
 ): Promise<{
   symptoms: string[];
+  allergies: string[];
   diagnosis: string;
   diagnosisData: Array<{ condition: string, confidence: number }>;
   treatment: string;
@@ -779,6 +780,7 @@ const analyzeConversationWithOpenAI = async (
     console.error('OpenAI API key is not configured');
     return {
       symptoms: ['Configuration error - OpenAI API key missing'],
+      allergies: [],
       diagnosis: 'System configuration error - unable to analyze',
       diagnosisData: [{ condition: 'System configuration error', confidence: 0 }],
       treatment: 'System configuration required',
@@ -812,10 +814,19 @@ const analyzeConversationWithOpenAI = async (
 
 CORE RULES:
 - Extract all current symptoms mentioned in the conversation
-- If doctor provides diagnosis, use it exactly as stated with high confidence
+- Extract all allergies mentioned by patient or identified by doctor (medications, foods, environmental)
+- If doctor provides diagnosis, use it exactly as stated with high confidence, if doctor do not provide any diagnosis provide the possible diagnosis based on the symptoms and the conversation.
 - If diagnosis is ruled out by tests/doctor, suggest alternative diagnoses based on symptoms
 - Always provide at least one possible diagnosis unless no symptoms are present
 - Use consistent medical terminology
+
+ALLERGIES EXTRACTION:
+- Only include allergies explicitly mentioned in the conversation
+- Include medication allergies (e.g., "allergic to penicillin", "cannot take aspirin")
+- Include food allergies (e.g., "allergic to peanuts", "lactose intolerant")
+- Include environmental allergies (e.g., "allergic to pollen", "dust allergy")
+- If no allergies mentioned, return empty array []
+- Do not assume or infer allergies that are not explicitly stated
 
 ELIMINATION HANDLING:
 - If previous diagnosis is ruled out by tests/examination, suggest alternative diagnoses for the same symptoms
@@ -832,6 +843,7 @@ CONFIDENCE SCORING:
 JSON FORMAT:
 {
   "symptoms": ["symptom1", "symptom2"],
+  "allergies": ["allergy1", "allergy2"],
   "possible_diagnosis": [{"condition": "name", "confidence": 85}],
   "possible_treatment": "treatment recommendation",
   "overall_confidence": 85,
@@ -909,6 +921,7 @@ Focus on what's NEW or DIFFERENT from the previous consultation and how it affec
 
     const result = {
       symptoms: Array.isArray(analysis.symptoms) ? analysis.symptoms : ['Symptoms not clearly identified'],
+      allergies: Array.isArray(analysis.allergies) ? analysis.allergies : [],
       diagnosis: diagnosisString,
       diagnosisData: diagnosisData,
       treatment: analysis.possible_treatment || 'Treatment recommendations pending further evaluation',
@@ -941,6 +954,7 @@ Focus on what's NEW or DIFFERENT from the previous consultation and how it affec
   console.error(`All models failed. Tried: ${modelsToTry.join(', ')}`);
   return {
     symptoms: ['Analysis failed - manual review required'],
+    allergies: [],
     diagnosis: 'Diagnosis pending - AI analysis unavailable',
     diagnosisData: [{ condition: 'Diagnosis pending - AI analysis unavailable', confidence: 0 }],
     treatment: 'Treatment recommendations unavailable - manual review required',
@@ -1053,6 +1067,7 @@ export const analyzeConversation = async (
           {
             conversationText,
             symptoms: analysis.symptoms,
+            allergies: analysis.allergies,
             diagnosis: analysis.diagnosis,
             treatment: analysis.treatment,
             confidence: analysis.confidence,
@@ -1066,6 +1081,7 @@ export const analyzeConversation = async (
           patient: patientId,
           conversationText,
           symptoms: analysis.symptoms,
+          allergies: analysis.allergies,
           diagnosis: analysis.diagnosis,
           treatment: analysis.treatment,
           confidence: analysis.confidence,
@@ -1078,6 +1094,7 @@ export const analyzeConversation = async (
         patient: patientId,
         conversationText,
         symptoms: analysis.symptoms,
+        allergies: analysis.allergies,
         diagnosis: analysis.diagnosis,
         treatment: analysis.treatment,
         confidence: analysis.confidence,

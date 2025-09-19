@@ -5,6 +5,7 @@ export interface IDiagnosis extends Document {
   patient: IPatient['_id'];
   conversationText: string;
   symptoms: string[];
+  allergies?: string[];
   diagnosis: string;
   treatment?: string;
   confidence?: number;
@@ -33,6 +34,11 @@ const diagnosisSchema = new Schema<IDiagnosis>({
       },
       message: 'At least one symptom is required'
     }
+  },
+  allergies: {
+    type: [String],
+    default: [],
+    required: false
   },
   diagnosis: {
     type: String,
