@@ -101,15 +101,23 @@ export class AnalysisIntegrationService {
         try {
           console.log(`Attempting 2D analysis (attempt ${attempt}/${maxRetries})`);
           
-          response = await fetch(`${PYTHON_API_BASE_URL}/analyze`, {
+          // Create a timeout promise
+          const timeoutPromise = new Promise<never>((_, reject) => {
+            setTimeout(() => reject(new Error('Request timeout')), 120000); // 2 minute timeout
+          });
+
+          // Create the fetch promise
+          const fetchPromise = fetch(`${PYTHON_API_BASE_URL}/analyze`, {
             method: 'POST',
             body: formData,
             headers: {
               ...formData.getHeaders(),
               'X-API-Key': process.env.BACKEND_API_KEY || '', // Add API key if available
-            },
-            timeout: 120000 // 2 minute timeout for Render.com cold starts
+            }
           });
+
+          // Race between fetch and timeout
+          response = await Promise.race([fetchPromise, timeoutPromise]);
 
           if (response.ok) {
             break; // Success, exit retry loop
@@ -258,12 +266,20 @@ export class AnalysisIntegrationService {
         try {
           console.log(`Attempting 3D analysis job submission (attempt ${attempt}/${maxRetries})`);
           
-          response = await fetch(`${PYTHON_API_BASE_URL}/jobs`, {
+          // Create a timeout promise
+          const timeoutPromise = new Promise<never>((_, reject) => {
+            setTimeout(() => reject(new Error('Request timeout')), 60000); // 60 second timeout
+          });
+
+          // Create the fetch promise
+          const fetchPromise = fetch(`${PYTHON_API_BASE_URL}/jobs`, {
             method: 'POST',
             body: formData,
-            headers: formData.getHeaders(),
-            timeout: 60000 // 60 second timeout
+            headers: formData.getHeaders()
           });
+
+          // Race between fetch and timeout
+          response = await Promise.race([fetchPromise, timeoutPromise]);
 
           if (response.ok) {
             break; // Success, exit retry loop
