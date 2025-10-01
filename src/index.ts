@@ -9,7 +9,9 @@ import authRoutes from './routes/auth';
 import userRoutes from './routes/user';
 import diagnosisRoutes from './routes/diagnosis';
 import patientRoutes from './routes/patient';
+import radiologyRoutes from './routes/radiology';
 import { authenticateToken } from './middleware/auth';
+import WasabiStorageService from './services/wasabiStorage';
 
 // Load environment variables
 dotenv.config();
@@ -50,6 +52,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/users', authenticateToken, userRoutes);
 app.use('/api/diagnosis', diagnosisRoutes);
 app.use('/api/patients', patientRoutes);
+app.use('/api/radiology', radiologyRoutes);
 
 // 404 handler
 app.use('*', (req, res) => {
@@ -64,6 +67,28 @@ const startServer = async () => {
   try {
     // Connect to MongoDB
     await connectDB();
+    
+    // Debug environment variables
+    console.log('🔍 Environment variables check:');
+    console.log('NODE_ENV:', process.env.NODE_ENV);
+    console.log('PORT:', process.env.PORT);
+    console.log('WASABI_ACCESS_KEY_ID:', process.env.WASABI_ACCESS_KEY_ID ? 'SET' : 'MISSING');
+    console.log('WASABI_SECRET_ACCESS_KEY:', process.env.WASABI_SECRET_ACCESS_KEY ? 'SET' : 'MISSING');
+    console.log('WASABI_BUCKET_NAME:', process.env.WASABI_BUCKET_NAME || 'MISSING');
+    console.log('PYTHON_API_BASE_URL:', process.env.PYTHON_API_BASE_URL || 'MISSING');
+
+    // Validate Wasabi configuration
+    if (WasabiStorageService.validateConfiguration()) {
+      console.log('✅ Wasabi storage configuration validated');
+      // Test connection (optional)
+      try {
+        await WasabiStorageService.testConnection();
+      } catch (error) {
+        console.error('❌ Wasabi connection test failed:', error);
+      }
+    } else {
+      console.warn('⚠️  Wasabi storage not configured properly. File uploads will fail.');
+    }
     
     app.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
