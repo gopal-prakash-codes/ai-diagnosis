@@ -8,6 +8,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const PYTHON_API_BASE_URL = process.env.PYTHON_API_BASE_URL || 'http://localhost:8000';
+const PYTHON_API_BASE_URL_2D = process.env.PYTHON_API_BASE_URL_2D || 'http://116.202.210.102:9012';
 
 export interface Analysis2DResult {
   modality?: string;
@@ -62,7 +63,7 @@ export class AnalysisIntegrationService {
         analysisType: '2D',
         analysisStartedAt: new Date(),
         analysisStatus: 'processing',
-        apiEndpoint: `${PYTHON_API_BASE_URL}/analyze`,
+        apiEndpoint: `${PYTHON_API_BASE_URL_2D}/analyze`,
         apiVersion: '1.0'
       });
       await analysisResult.save();
@@ -77,6 +78,12 @@ export class AnalysisIntegrationService {
 
       const fileBuffer = await fileResponse.buffer();
 
+      // Validate that it's actually an image file
+      const validImageTypes = ['image/jpeg', 'image/jpg', 'image/png'];
+      if (!validImageTypes.includes(scanRecord.mimeType)) {
+        throw new Error(`Invalid file type for 2D analysis: ${scanRecord.mimeType}. Only JPG and PNG images are supported.`);
+      }
+
       // Create FormData for API request
       const FormData = require('form-data');
       const formData = new FormData();
@@ -84,14 +91,18 @@ export class AnalysisIntegrationService {
       // Set max listeners to prevent memory leak warning
       formData.setMaxListeners(20);
       
-      formData.append('zip_file', fileBuffer, {
+      // Append ONLY the image file with correct content type
+      // API expects 'file' field name (not 'image')
+      formData.append('file', fileBuffer, {
         filename: scanRecord.originalFileName,
-        contentType: scanRecord.mimeType || 'application/zip'
+        contentType: scanRecord.mimeType
       });
-      formData.append('client_id', process.env.ANALYSIS_CLIENT_ID || 'test_client');
 
-      console.log(`📤 Sending to Python API: ${PYTHON_API_BASE_URL}/analyze`);
-      console.log(`📄 File: ${scanRecord.originalFileName} (${scanRecord.mimeType}, ${fileBuffer.length} bytes)`);
+      console.log(`📤 Sending to Python 2D API: ${PYTHON_API_BASE_URL_2D}/analyze`);
+      console.log(`📄 File: ${scanRecord.originalFileName}`);
+      console.log(`📄 MIME Type: ${scanRecord.mimeType}`);
+      console.log(`📄 File Size: ${fileBuffer.length} bytes (${(fileBuffer.length / 1024).toFixed(2)} KB)`);
+      console.log(`📄 FormData fields:`, Object.keys(formData));
 
       // Call Python FastAPI backend for analysis with retry logic
       let response;
@@ -108,7 +119,7 @@ export class AnalysisIntegrationService {
           });
 
           // Create the fetch promise
-          const fetchPromise = fetch(`${PYTHON_API_BASE_URL}/analyze`, {
+          const fetchPromise = fetch(`${PYTHON_API_BASE_URL_2D}/analyze`, {
             method: 'POST',
             body: formData,
             headers: {
