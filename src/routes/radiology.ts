@@ -11,6 +11,7 @@ import {
   generateDownloadUrl,
   getPatientRadiologyReports,
   deleteRadiologyReport,
+  deleteScanRecord,
   uploadMiddleware
 } from '../controllers/radiologyController';
 import { authenticateToken } from '../middleware/auth';
@@ -242,6 +243,30 @@ router.get('/scans/:scanRecordId/download', [
     .isIn(['original', 'analyzed', 'report'])
     .withMessage('File type must be original, analyzed, or report')
 ], generateDownloadUrl);
+
+/**
+ * @route DELETE /api/radiology/scans/:scanRecordId
+ * @desc Delete a scan record and associated files
+ * @access Private
+ */
+router.delete('/scans/:scanRecordId', [
+  param('scanRecordId')
+    .notEmpty()
+    .withMessage('Scan record ID is required')
+    .isMongoId()
+    .withMessage('Invalid scan record ID format')
+], deleteScanRecord);
+
+/**
+ * @route DELETE /api/radiology/reports/:reportId
+ * @desc Delete a radiology report and associated files
+ * @access Private
+ */
+router.delete('/reports/:reportId', [
+  param('reportId')
+    .notEmpty()
+    .withMessage('Report ID is required')
+], deleteRadiologyReport);
 
 /**
  * @route GET /api/radiology/patients/:patientId/reports

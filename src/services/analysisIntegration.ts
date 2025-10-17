@@ -84,10 +84,11 @@ export class AnalysisIntegrationService {
       // Set max listeners to prevent memory leak warning
       formData.setMaxListeners(20);
       
-      formData.append('file', fileBuffer, {
+      formData.append('zip_file', fileBuffer, {
         filename: scanRecord.originalFileName,
-        contentType: scanRecord.mimeType
+        contentType: scanRecord.mimeType || 'application/zip'
       });
+      formData.append('client_id', process.env.ANALYSIS_CLIENT_ID || 'test_client');
 
       console.log(`📤 Sending to Python API: ${PYTHON_API_BASE_URL}/analyze`);
       console.log(`📄 File: ${scanRecord.originalFileName} (${scanRecord.mimeType}, ${fileBuffer.length} bytes)`);
@@ -95,7 +96,7 @@ export class AnalysisIntegrationService {
       // Call Python FastAPI backend for analysis with retry logic
       let response;
       let lastError;
-      const maxRetries = 5; // Increased retries for Render.com cold starts
+      const maxRetries = 3; 
       
       for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
@@ -126,13 +127,15 @@ export class AnalysisIntegrationService {
           const errorText = await response.text();
           lastError = `Python Analysis API error: ${response.status} - ${errorText}`;
           
-          // Check for specific error types
-          if (errorText.includes('Cloudflare Tunnel error') || response.status === 530) {
+          if (response.status === 429 || errorText.toLowerCase().includes('too many requests') || errorText.toLowerCase().includes('rate limit')) {
+            lastError = 'Rate limit reached. Please wait a few minutes before trying again.';
+            console.error('Rate limit error detected - stopping retries');
+            break; 
+          } else if (errorText.includes('Cloudflare Tunnel error') || response.status === 530) {
             lastError = 'Python Analysis Service is temporarily unavailable (Cloudflare Tunnel error). Please try again later.';
           } else if (errorText.includes('Non-medical image detected')) {
             lastError = 'The uploaded image was not recognized as a medical image. Please upload a valid medical scan, X-ray, or diagnostic image.';
-            // Don't retry for non-medical images
-            break;
+            break; // Don't retry for non-medical images
           } else if (errorText.includes('Only PNG/JPG images are supported')) {
             lastError = 'Invalid image format. Please upload PNG or JPEG images only.';
             break;
@@ -144,8 +147,8 @@ export class AnalysisIntegrationService {
           console.warn(`Analysis attempt ${attempt} failed:`, lastError);
           
           if (attempt < maxRetries) {
-            // Wait before retrying (longer delays for Render.com cold starts)
-            const delay = attempt <= 2 ? 10000 : Math.pow(2, attempt) * 2000; // 10s for first 2 attempts, then exponential
+            // Longer delays to avoid rate limiting: 15s, 30s
+            const delay = attempt === 1 ? 15000 : 30000;
             console.log(`Waiting ${delay/1000}s before retry...`);
             await new Promise(resolve => setTimeout(resolve, delay));
           }
@@ -155,8 +158,8 @@ export class AnalysisIntegrationService {
           console.warn(`Analysis attempt ${attempt} failed:`, lastError);
           
           if (attempt < maxRetries) {
-            // Wait before retrying (longer delays for Render.com cold starts)
-            const delay = attempt <= 2 ? 10000 : Math.pow(2, attempt) * 2000; // 10s for first 2 attempts, then exponential
+            // Longer delays to avoid rate limiting: 15s, 30s
+            const delay = attempt === 1 ? 15000 : 30000;
             console.log(`Waiting ${delay/1000}s before retry...`);
             await new Promise(resolve => setTimeout(resolve, delay));
           }
@@ -252,10 +255,11 @@ export class AnalysisIntegrationService {
       // Set max listeners to prevent memory leak warning
       formData.setMaxListeners(20);
       
-      formData.append('file', fileBuffer, {
+      formData.append('zip_file', fileBuffer, {
         filename: scanRecord.originalFileName,
         contentType: scanRecord.mimeType
       });
+      formData.append('client_id', process.env.ANALYSIS_CLIENT_ID || 'test_client');
 
       // Call Python FastAPI backend for 3D analysis job submission with retry logic
       let response;
@@ -265,6 +269,8 @@ export class AnalysisIntegrationService {
       for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
           console.log(`Attempting 3D analysis job submission (attempt ${attempt}/${maxRetries})`);
+          console.log(`📤 Sending to Python API: ${PYTHON_API_BASE_URL}/jobs`);
+          console.log(`📄 File: ${scanRecord.originalFileName} (${scanRecord.mimeType}, ${fileBuffer.length} bytes)`);
           
           // Create a timeout promise
           const timeoutPromise = new Promise<never>((_, reject) => {
@@ -288,16 +294,22 @@ export class AnalysisIntegrationService {
           const errorText = await response.text();
           lastError = `Python 3D Analysis API error: ${response.status} - ${errorText}`;
           
-          // Check if it's a Cloudflare tunnel error
-          if (errorText.includes('Cloudflare Tunnel error') || response.status === 530) {
+          // Check for specific error types that shouldn't be retried
+          if (response.status === 429 || errorText.toLowerCase().includes('too many requests') || errorText.toLowerCase().includes('rate limit')) {
+            lastError = 'Rate limit reached. Please wait a few minutes before trying again.';
+            console.error('Rate limit error detected - stopping retries');
+            break; // Don't retry on rate limits
+          } else if (errorText.includes('Cloudflare Tunnel error') || response.status === 530) {
             lastError = 'Python Analysis Service is temporarily unavailable (Cloudflare Tunnel error). Please try again later.';
           }
           
           console.warn(`3D analysis attempt ${attempt} failed:`, lastError);
           
           if (attempt < maxRetries) {
-            // Wait before retrying (exponential backoff)
-            await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
+            // Longer delays to avoid rate limiting: 15s, 30s
+            const delay = attempt === 1 ? 15000 : 30000;
+            console.log(`Waiting ${delay/1000}s before retry...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
           }
           
         } catch (fetchError) {
@@ -305,7 +317,10 @@ export class AnalysisIntegrationService {
           console.warn(`3D analysis attempt ${attempt} failed:`, lastError);
           
           if (attempt < maxRetries) {
-            await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
+            // Longer delays to avoid rate limiting: 15s, 30s
+            const delay = attempt === 1 ? 15000 : 30000;
+            console.log(`Waiting ${delay/1000}s before retry...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
           }
         }
       }
@@ -314,12 +329,14 @@ export class AnalysisIntegrationService {
         throw new Error(lastError || 'Failed to connect to Python Analysis Service after multiple attempts');
       }
 
-      const result: Analysis3DJobResponse = await response.json() as Analysis3DJobResponse;
-      const jobId = result.job_id || result.status;
+      const result = await response.json() as { job_id: string; state: string };
+      const jobId = result.job_id;
 
       if (!jobId) {
         throw new Error('No job ID returned from analysis API');
       }
+
+      console.log(`✅ 3D Analysis job created successfully: ${jobId}, state: ${result.state}`);
 
       // Create analysis result record
       const analysisResult = new AnalysisResult({
@@ -362,8 +379,8 @@ export class AnalysisIntegrationService {
    */
   private static async poll3DJobStatus(jobId: string, scanRecordId: string): Promise<void> {
     let attempts = 0;
-    const maxAttempts = 200; // ~10 minutes max
-    const pollInterval = 3000; // 3 seconds
+    const maxAttempts = 20; 
+    const pollInterval = 30000; 
 
     const poll = async () => {
       try {
@@ -383,17 +400,17 @@ export class AnalysisIntegrationService {
           return;
         }
 
-        const statusData: Analysis3DStatusResponse = await statusResponse.json() as Analysis3DStatusResponse;
-        const state = statusData.state || statusData.status || statusData.job_state;
+        const statusData = await statusResponse.json() as { state: string; error?: string };
+        const state = statusData.state;
 
         console.log(`Job ${jobId} status: ${state} (attempt ${attempts})`);
 
-        if (state === 'completed' || state === 'finished' || state === 'succeeded' || statusData.outputs) {
+        if (state === 'completed' || state === 'finished' || state === 'succeeded') {
           await this.handle3DJobCompletion(jobId, scanRecordId, statusData);
         } else if (state === 'failed' || state === 'error') {
           await this.handle3DJobFailure(jobId, scanRecordId, statusData);
         } else {
-          // Continue polling
+          // Continue polling for 'queued' or 'running' states
           setTimeout(poll, pollInterval);
         }
 
@@ -413,26 +430,98 @@ export class AnalysisIntegrationService {
   private static async handle3DJobCompletion(
     jobId: string, 
     scanRecordId: string, 
-    statusData: Analysis3DStatusResponse
+    statusData: any
   ): Promise<void> {
     try {
+      // Download the result ZIP file
+      let resultZipUrl = null;
+      let resultZipKey = null;
+      try {
+        const resultResponse = await fetch(`${PYTHON_API_BASE_URL}/jobs/${encodeURIComponent(jobId)}/result`);
+        
+        if (resultResponse.ok) {
+          // Upload result ZIP to Wasabi storage
+          const resultBuffer = await resultResponse.buffer();
+          const resultFileName = `${jobId}_results.zip`;
+          
+          const uploadResult = await WasabiStorageService.uploadFile(
+            resultBuffer,
+            resultFileName,
+            {
+              folder: 'analysis-results',
+              contentType: 'application/zip',
+              metadata: {
+                'job_id': jobId.replace(/[^\w]/g, ''),
+                'scan_record_id': scanRecordId.replace(/[^\w]/g, ''),
+                'type': 'analysis_result'
+              }
+            }
+          );
+          
+          resultZipUrl = uploadResult.url;
+          resultZipKey = uploadResult.key;
+          console.log(`✅ Result ZIP uploaded to storage: ${resultZipUrl}`);
+        } else {
+          console.warn(`Failed to download result ZIP for job ${jobId}: ${resultResponse.status}`);
+        }
+      } catch (resultError) {
+        console.error(`Error downloading result ZIP for job ${jobId}:`, resultError);
+      }
+
+      let reportText = '';
+      let findings = '';
+      
+      try {
+        if (statusData.series && Array.isArray(statusData.series)) {
+          const reportTexts: string[] = [];
+          
+          for (const series of statusData.series) {
+            if (series.calculated_dimensions) {
+              for (const modelKey in series.calculated_dimensions) {
+                const dimensions = series.calculated_dimensions[modelKey];
+                if (Array.isArray(dimensions)) {
+                  for (const dim of dimensions) {
+                    if (dim.report_text) {
+                      reportTexts.push(dim.report_text);
+                    }
+                  }
+                }
+              }
+            }
+          }
+          
+          if (reportTexts.length > 0) {
+            reportText = reportTexts.join('\n\n');
+            findings = reportText; // Use as findings for the report
+          }
+        }
+      } catch (extractError) {
+        console.error('Error extracting report_text:', extractError);
+      }
+
       // Update analysis result
       await AnalysisResult.findOneAndUpdate(
         { jobId: jobId },
         {
           analysisStatus: 'completed',
           analysisCompletedAt: new Date(),
-          rawData: statusData
+          rawData: statusData,
+          resultZipUrl: resultZipUrl,
+          findings: findings || 'Analysis completed - 3D segmentation available',
+          diagnosis: findings ? '3D Analysis Complete' : 'Analysis completed - view results',
+          treatmentPlan: 'Review 3D segmentation results and clinical correlation recommended'
         }
       );
 
-      // Update scan record
+      // Update scan record with analyzed file references
       await ScanRecord.findByIdAndUpdate(scanRecordId, {
         analysisStatus: 'completed',
-        analysisCompletedAt: new Date()
+        analysisCompletedAt: new Date(),
+        analyzedFileUrl: resultZipUrl,
+        analyzedFileKey: resultZipKey
       });
 
-      console.log(`3D Analysis completed for job ${jobId}`);
+      console.log(`✅ 3D Analysis completed for job ${jobId}`);
 
     } catch (error) {
       console.error(`Error handling 3D job completion for ${jobId}:`, error);
@@ -445,7 +534,7 @@ export class AnalysisIntegrationService {
   private static async handle3DJobFailure(
     jobId: string, 
     scanRecordId: string, 
-    statusData: Analysis3DStatusResponse
+    statusData: any
   ): Promise<void> {
     try {
       const errorMessage = statusData.error || 'Analysis failed';

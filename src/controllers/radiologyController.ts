@@ -775,3 +775,58 @@ export const deleteRadiologyReport = async (req: Request, res: Response): Promis
     });
   }
 };
+
+/**
+ * Delete scan record and associated files
+ */
+export const deleteScanRecord = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { scanRecordId } = req.params;
+
+    // Find the scan record
+    const scanRecord = await ScanRecord.findById(scanRecordId);
+    
+    if (!scanRecord) {
+      res.status(404).json({
+        success: false,
+        message: 'Scan record not found'
+      });
+      return;
+    }
+
+    // Delete files from Wasabi storage
+    try {
+      if (scanRecord.originalFileKey) {
+        await WasabiStorageService.deleteFile(scanRecord.originalFileKey);
+      }
+      if (scanRecord.analyzedFileKey) {
+        await WasabiStorageService.deleteFile(scanRecord.analyzedFileKey);
+      }
+      if (scanRecord.reportFileKey) {
+        await WasabiStorageService.deleteFile(scanRecord.reportFileKey);
+      }
+    } catch (error) {
+      console.error(`Failed to delete files for scan record ${scanRecord._id}:`, error);
+      // Continue with deletion even if file deletion fails
+    }
+
+    // Delete analysis results
+    await AnalysisResult.deleteMany({ scanRecord: scanRecord._id });
+
+    // Delete the scan record
+    await ScanRecord.findByIdAndDelete(scanRecord._id);
+
+    res.json({
+      success: true,
+      message: 'Scan record and associated files deleted successfully'
+    });
+
+  } catch (error) {
+    console.error('Delete scan record error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete scan record',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+};
