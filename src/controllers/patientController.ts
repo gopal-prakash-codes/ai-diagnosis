@@ -143,7 +143,7 @@ export const deletePatient = async (
   next: NextFunction
 ): Promise<void> => {
   try {
-    const { id } = req.params;
+    const { id } = req.params;                                               
 
     const patient = await Patient.findById(id);
     if (!patient) {

@@ -113,9 +113,8 @@ export class AnalysisIntegrationService {
         try {
           console.log(`Attempting 2D analysis (attempt ${attempt}/${maxRetries})`);
           
-          // Create a timeout promise
           const timeoutPromise = new Promise<never>((_, reject) => {
-            setTimeout(() => reject(new Error('Request timeout')), 120000); // 2 minute timeout
+            setTimeout(() => reject(new Error('Request timeout')), 30000); // 30 second timeout
           });
 
           // Create the fetch promise
@@ -158,8 +157,8 @@ export class AnalysisIntegrationService {
           console.warn(`Analysis attempt ${attempt} failed:`, lastError);
           
           if (attempt < maxRetries) {
-            // Longer delays to avoid rate limiting: 15s, 30s
-            const delay = attempt === 1 ? 15000 : 30000;
+            // Shorter delays: 3s, 5s
+            const delay = attempt === 1 ? 3000 : 5000;
             console.log(`Waiting ${delay/1000}s before retry...`);
             await new Promise(resolve => setTimeout(resolve, delay));
           }
@@ -169,8 +168,8 @@ export class AnalysisIntegrationService {
           console.warn(`Analysis attempt ${attempt} failed:`, lastError);
           
           if (attempt < maxRetries) {
-            // Longer delays to avoid rate limiting: 15s, 30s
-            const delay = attempt === 1 ? 15000 : 30000;
+            // Shorter delays: 3s, 5s
+            const delay = attempt === 1 ? 3000 : 5000;
             console.log(`Waiting ${delay/1000}s before retry...`);
             await new Promise(resolve => setTimeout(resolve, delay));
           }
@@ -283,9 +282,9 @@ export class AnalysisIntegrationService {
           console.log(`📤 Sending to Python API: ${PYTHON_API_BASE_URL}/jobs`);
           console.log(`📄 File: ${scanRecord.originalFileName} (${scanRecord.mimeType}, ${fileBuffer.length} bytes)`);
           
-          // Create a timeout promise
+          // Create a timeout promise (reduced to 20 seconds)
           const timeoutPromise = new Promise<never>((_, reject) => {
-            setTimeout(() => reject(new Error('Request timeout')), 60000); // 60 second timeout
+            setTimeout(() => reject(new Error('Request timeout')), 20000); // 20 second timeout
           });
 
           // Create the fetch promise
@@ -317,8 +316,8 @@ export class AnalysisIntegrationService {
           console.warn(`3D analysis attempt ${attempt} failed:`, lastError);
           
           if (attempt < maxRetries) {
-            // Longer delays to avoid rate limiting: 15s, 30s
-            const delay = attempt === 1 ? 15000 : 30000;
+            // Shorter delays: 3s, 5s
+            const delay = attempt === 1 ? 3000 : 5000;
             console.log(`Waiting ${delay/1000}s before retry...`);
             await new Promise(resolve => setTimeout(resolve, delay));
           }
@@ -328,8 +327,8 @@ export class AnalysisIntegrationService {
           console.warn(`3D analysis attempt ${attempt} failed:`, lastError);
           
           if (attempt < maxRetries) {
-            // Longer delays to avoid rate limiting: 15s, 30s
-            const delay = attempt === 1 ? 15000 : 30000;
+            // Shorter delays: 3s, 5s
+            const delay = attempt === 1 ? 3000 : 5000;
             console.log(`Waiting ${delay/1000}s before retry...`);
             await new Promise(resolve => setTimeout(resolve, delay));
           }
@@ -390,8 +389,8 @@ export class AnalysisIntegrationService {
    */
   private static async poll3DJobStatus(jobId: string, scanRecordId: string): Promise<void> {
     let attempts = 0;
-    const maxAttempts = 20; 
-    const pollInterval = 30000; 
+    const maxAttempts = 60; // Increased to 60 since we're polling faster
+    const pollInterval = 5000; // Reduced to 5 seconds for faster updates 
 
     const poll = async () => {
       try {

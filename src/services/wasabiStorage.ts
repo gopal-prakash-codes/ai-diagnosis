@@ -52,6 +52,9 @@ export interface UploadOptions {
   acl?: 'private' | 'public-read' | 'public-read-write';
 }
 
+// URL cache to avoid regenerating signed URLs
+const urlCache = new Map<string, { url: string; expiresAt: number }>();
+
 export class WasabiStorageService {
   
   /**
@@ -188,17 +191,33 @@ export class WasabiStorageService {
   }
 
   /**
-   * Generate a pre-signed URL for file download
+   * Generate a pre-signed URL for file download (with caching)
    */
   static async generateDownloadUrl(key: string, expiresIn: number = 3600): Promise<string> {
     try {
+      const now = Date.now();
+      const cacheKey = `${key}:${expiresIn}`;
+      const cached = urlCache.get(cacheKey);
+      if (cached && cached.expiresAt > now + 300000) {
+        console.log(`✅ Using cached URL for ${key} (expires in ${Math.round((cached.expiresAt - now) / 1000)}s)`);
+        return cached.url;
+      }
+
+      // Generate new signed URL
       const params = {
         Bucket: wasabiBucket,
         Key: key,
         Expires: expiresIn // URL expires in seconds (default: 1 hour)
       };
 
-      return s3.getSignedUrl('getObject', params);
+      const url = s3.getSignedUrl('getObject', params);
+      urlCache.set(cacheKey, {
+        url,
+        expiresAt: now + (expiresIn * 1000) - 300000
+      });
+      
+      console.log(`🔗 Generated new signed URL for ${key} (expires in ${expiresIn}s)`);
+      return url;
     } catch (error) {
       console.error('Error generating download URL:', error);
       throw new Error(`Failed to generate download URL: ${error instanceof Error ? error.message : 'Unknown error'}`);
