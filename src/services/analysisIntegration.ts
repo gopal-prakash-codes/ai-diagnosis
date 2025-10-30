@@ -389,8 +389,8 @@ export class AnalysisIntegrationService {
    */
   private static async poll3DJobStatus(jobId: string, scanRecordId: string): Promise<void> {
     let attempts = 0;
-    const maxAttempts = 60; // Increased to 60 since we're polling faster
-    const pollInterval = 5000; // Reduced to 5 seconds for faster updates 
+    const maxAttempts = 50; 
+    const pollInterval = 20000; 
 
     const poll = async () => {
       try {
