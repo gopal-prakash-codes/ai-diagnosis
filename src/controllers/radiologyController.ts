@@ -12,7 +12,7 @@ import { validationResult } from 'express-validator';
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 200 * 1024 * 1024, 
+    fileSize: 1024 * 1024 * 1024, 
   },
   fileFilter: (req, file, cb) => {
     const allowedMimes = [
