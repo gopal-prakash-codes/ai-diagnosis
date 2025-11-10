@@ -7,6 +7,27 @@ import fs from "fs";
 import { AssemblyAI } from 'assemblyai';
 import crypto from 'crypto';
 
+const parseJSONWithFallback = (input: string): any => {
+  if (!input) {
+    return null;
+  }
+  try {
+    return JSON.parse(input);
+  } catch {
+    const start = input.indexOf('{');
+    const end = input.lastIndexOf('}');
+    if (start !== -1 && end !== -1 && end >= start) {
+      const candidate = input.slice(start, end + 1);
+      try {
+        return JSON.parse(candidate);
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+};
+
 export const transcribe = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   let filePath: string | undefined;
 
@@ -762,6 +783,173 @@ const contentBasedAlignment = (fullWhisperText: string, whisperSentences: string
       mappingMethod: 'content-proportional'
     };
   });
+};
+
+export const generateLiveSuggestions = async (req: Request, res: Response): Promise<void> => {
+  try {
+    if (!process.env.OPENAI_API_KEY) {
+      res.status(500).json({
+        success: false,
+        error: "OpenAI API key not configured"
+      });
+      return;
+    }
+
+    const { conversation, patient, context, maxSuggestions } = req.body;
+
+    if (!Array.isArray(conversation) || conversation.length === 0) {
+      res.status(400).json({
+        success: false,
+        error: "Conversation data is required"
+      });
+      return;
+    }
+
+    const normalizedConversation = conversation
+      .filter((entry: any) => entry && typeof entry === 'object')
+      .map((entry: any) => {
+        const role = typeof entry.role === 'string' ? entry.role.toLowerCase() : '';
+        const speaker = role === 'doctor' ? 'Doctor' : 'Patient';
+        const content = typeof entry.content === 'string' ? entry.content.trim() : '';
+        return { speaker, content };
+      })
+      .filter(entry => entry.content);
+
+    if (normalizedConversation.length === 0) {
+      res.status(400).json({
+        success: false,
+        error: "Conversation content is empty"
+      });
+      return;
+    }
+
+    const limitedConversation = normalizedConversation.slice(-12);
+    const conversationText = limitedConversation.map(entry => `${entry.speaker}: ${entry.content}`).join('\n');
+    const cappedMax = typeof maxSuggestions === 'number' && maxSuggestions > 0 ? Math.min(Math.round(maxSuggestions), 5) : 3;
+
+    const patientDetails: string[] = [];
+    if (patient && typeof patient === 'object') {
+      if (patient.name) {
+        patientDetails.push(`Name: ${patient.name}`);
+      }
+      if (patient.age) {
+        patientDetails.push(`Age: ${patient.age}`);
+      }
+      if (patient.gender) {
+        patientDetails.push(`Gender: ${patient.gender}`);
+      }
+      if (patient.id || patient._id) {
+        patientDetails.push(`ID: ${patient.id || patient._id}`);
+      }
+    }
+    if (context && typeof context === 'object') {
+      if (context.reason) {
+        patientDetails.push(`Visit Reason: ${context.reason}`);
+      }
+      if (context.notes) {
+        patientDetails.push(`Notes: ${context.notes}`);
+      }
+    }
+
+    const summaryText = patientDetails.length > 0 ? `Patient Context:\n${patientDetails.join('\n')}\n\n` : '';
+
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const models = ["gpt-4o-mini", "gpt-4-turbo", "gpt-4"];
+    let responseContent: string | null = null;
+    let modelUsed: string | null = null;
+
+    const userPrompt = `${summaryText}Conversation Transcript:\n${conversationText}\n\nReturn JSON with this shape:\n{"suggestions":[{"question":"string","rationale":"string","priority":"routine|important|urgent"}]}\nProvide up to ${cappedMax} suggestions. Avoid repeating previous content. Focus on clinically meaningful next questions. Keep rationale under 140 characters.`;
+
+    for (const model of models) {
+      try {
+        const completion = await openai.chat.completions.create({
+          model,
+          temperature: 0.3,
+          max_tokens: 400,
+          messages: [
+            {
+              role: "system",
+              content: "You assist clinicians during live consultations by recommending the most valuable next questions or actions. Respond with JSON only."
+            },
+            {
+              role: "user",
+              content: userPrompt
+            }
+          ]
+        });
+        const content = completion.choices[0]?.message?.content;
+        if (content) {
+          responseContent = content;
+          modelUsed = model;
+          break;
+        }
+      } catch (error) {
+        if (model === models[models.length - 1]) {
+          throw error;
+        }
+      }
+    }
+
+    if (!responseContent) {
+      res.status(500).json({
+        success: false,
+        error: "Failed to generate suggestions"
+      });
+      return;
+    }
+
+    const parsed = parseJSONWithFallback(responseContent);
+    let suggestions: Array<{ question: string; rationale: string; priority: string }> = [];
+
+    if (parsed && Array.isArray(parsed.suggestions)) {
+      suggestions = parsed.suggestions
+        .map((item: any) => {
+          if (!item) {
+            return null;
+          }
+          const question = typeof item.question === 'string' ? item.question.trim() : '';
+          if (!question) {
+            return null;
+          }
+          const rationale = typeof item.rationale === 'string' ? item.rationale.trim() : '';
+          const priorityRaw = typeof item.priority === 'string' ? item.priority.trim().toLowerCase() : '';
+          const priority = ["routine", "important", "urgent"].includes(priorityRaw) ? priorityRaw : "routine";
+          return { question, rationale, priority };
+        })
+        .filter(Boolean)
+        .slice(0, cappedMax);
+    }
+
+    if (suggestions.length === 0) {
+      const fallbackList = responseContent
+        .split('\n')
+        .map(line => line.trim())
+        .filter(line => line.length > 0)
+        .slice(0, cappedMax);
+
+      suggestions = fallbackList
+        .map(line => ({
+          question: line.replace(/^[-*•\d.\s]+/, '').trim(),
+          rationale: "",
+          priority: "routine"
+        }))
+        .filter(item => item.question.length > 0);
+    }
+
+    res.json({
+      success: true,
+      data: {
+        suggestions,
+        model: modelUsed
+      }
+    });
+  } catch (error) {
+    console.error('Suggestion generation failed:', error);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error while generating suggestions"
+    });
+  }
 };
 
 const analyzeConversationWithOpenAI = async (

@@ -4,7 +4,8 @@ import {
   getDiagnosisHistory,
   getDiagnosisById,
   transcribe,
-  transcribeWithSpeakers
+  transcribeWithSpeakers,
+  generateLiveSuggestions
 } from '../controllers/diagnosisController';
 import { upload } from '../middleware/multerSetup';
 import { authenticateToken } from '../middleware/auth';
@@ -12,6 +13,7 @@ import { authenticateToken } from '../middleware/auth';
 const router = Router();
 router.use(authenticateToken);
 router.post('/analyze', analyzeConversation);
+router.post('/suggestions', generateLiveSuggestions);
 router.get('/patient/:patientId', getDiagnosisHistory);
 router.get('/:id', getDiagnosisById);
 router.post('/transcribe', upload.single("file"), transcribe);
