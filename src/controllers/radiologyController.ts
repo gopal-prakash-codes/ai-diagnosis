@@ -7,6 +7,7 @@ import WasabiStorageService from '../services/wasabiStorage';
 import AnalysisIntegrationService from '../services/analysisIntegration';
 import multer from 'multer';
 import { validationResult } from 'express-validator';
+import { getUserFilter } from '../utils/userFilter';
 
 // Configure multer for memory storage
 const upload = multer({
@@ -54,17 +55,14 @@ export const createRadiologyReport = async (req: Request, res: Response): Promis
     const {
       patientId,
       reportType,
-      doctor,
-      clinicName,
-      clinicAddress,
       symptoms,
       diagnosis,
       confidence,
       treatment
     } = req.body;
 
-    // Verify patient exists
-    const patient = await Patient.findById(patientId);
+    const userFilter = getUserFilter(req);
+    const patient = await Patient.findOne({ _id: patientId, ...userFilter });
     if (!patient) {
       res.status(404).json({
         success: false,
@@ -73,16 +71,22 @@ export const createRadiologyReport = async (req: Request, res: Response): Promis
       return;
     }
 
-    // Generate unique report ID
     const reportId = `RPT-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
+    if (!req.user!.organization) {
+      res.status(400).json({
+        success: false,
+        message: 'User does not belong to an organization'
+      });
+      return;
+    }
+
     const report = new RadiologyReport({
+      user: req.user!._id,
+      organization: req.user!.organization,
       patient: patientId,
       reportId,
       reportType: reportType || 'Report',
-      doctor: doctor || 'Dr. [To be filled]',
-      clinicName: clinicName || 'Clinic [To be filled]',
-      clinicAddress: clinicAddress || 'Address [To be filled]',
       symptoms: Array.isArray(symptoms) ? symptoms : (symptoms ? [symptoms] : ['Pending Analysis']),
       diagnosis: diagnosis || 'Pending Analysis - Upload and analyze medical images to generate diagnosis',
       confidence: confidence || 0,
@@ -114,38 +118,16 @@ export const createRadiologyReport = async (req: Request, res: Response): Promis
 export const getRadiologyReport = async (req: Request, res: Response): Promise<void> => {
   try {
     const { reportId } = req.params;
-    console.log('🔍 GET /api/radiology/reports/:reportId called with ID:', reportId);
-
     const isObjectId = /^[0-9a-fA-F]{24}$/.test(reportId);
-    console.log('📋 ID format detected:', isObjectId ? 'MongoDB ObjectId' : 'Custom Report ID');
+    const userFilter = getUserFilter(req);
     
     let report;
     if (isObjectId) {
-      console.log('🔎 Searching by MongoDB _id...');
-      report = await RadiologyReport.findById(reportId)
+      report = await RadiologyReport.findOne({ _id: reportId, ...userFilter })
         .populate('patient', 'name age gender');
     } else {
-      console.log('🔎 Searching by custom reportId field...');
-      report = await RadiologyReport.findOne({ reportId })
+      report = await RadiologyReport.findOne({ reportId, ...userFilter })
         .populate('patient', 'name age gender');
-    }
-    
-    console.log('📊 Report found:', report ? 'YES' : 'NO');
-    if (report) {
-      console.log('📄 Report details:', {
-        _id: report._id,
-        reportId: report.reportId,
-        patientName: report.patient?.name
-      });
-    } else {
-      console.log('🔍 Debug: Checking what reports exist in database...');
-      const allReports = await RadiologyReport.find({}).limit(5).select('_id reportId patient');
-      console.log('📋 Found', allReports.length, 'reports in database');
-      if (allReports.length > 0) {
-        console.log('📋 Available reports:', allReports.map(r => ({ _id: r._id, reportId: r.reportId })));
-      } else {
-        console.log('📋 No reports found in database - database might be empty');
-      }
     }
 
     if (!report) {
@@ -156,20 +138,23 @@ export const getRadiologyReport = async (req: Request, res: Response): Promise<v
       return;
     }
 
-    // Get associated scan records
     const scanRecords = await ScanRecord.find({ report: report._id })
-      .populate('report', 'reportId reportType');
+      .populate('report', 'reportId reportType')
+      .lean();
 
-    // Get analysis results for each scan record
-    const scanRecordsWithResults = await Promise.all(
-      scanRecords.map(async (scan) => {
-        const analysisResult = await AnalysisResult.findOne({ scanRecord: scan._id });
-        return {
-          ...scan.toObject(),
-          analysisResult
-        };
-      })
+    const scanRecordIds = scanRecords.map(scan => scan._id);
+    const analysisResults = await AnalysisResult.find({ 
+      scanRecord: { $in: scanRecordIds } 
+    }).lean();
+
+    const analysisResultsMap = new Map(
+      analysisResults.map(result => [result.scanRecord.toString(), result])
     );
+
+    const scanRecordsWithResults = scanRecords.map(scan => ({
+      ...scan,
+      analysisResult: analysisResultsMap.get(scan._id.toString()) || null
+    }));
 
     res.json({
       success: true,
@@ -193,7 +178,9 @@ export const getRadiologyReport = async (req: Request, res: Response): Promise<v
  * Upload and process scan files
  */
 export const uploadScanFiles = async (req: Request, res: Response): Promise<void> => {
+  const startTime = Date.now();
   try {
+    console.log(`📤 Upload request received for report: ${req.params.reportId}`);
     const { reportId } = req.params;
     const { scanType } = req.body;
 
@@ -205,14 +192,14 @@ export const uploadScanFiles = async (req: Request, res: Response): Promise<void
       return;
     }
 
-    // Find the report - handle both ObjectId and custom reportId
     const isObjectId = /^[0-9a-fA-F]{24}$/.test(reportId);
+    const userFilter = getUserFilter(req);
     
     let report;
     if (isObjectId) {
-      report = await RadiologyReport.findById(reportId);
+      report = await RadiologyReport.findOne({ _id: reportId, ...userFilter });
     } else {
-      report = await RadiologyReport.findOne({ reportId });
+      report = await RadiologyReport.findOne({ reportId, ...userFilter });
     }
     
     if (!report) {
@@ -226,12 +213,12 @@ export const uploadScanFiles = async (req: Request, res: Response): Promise<void
     const files = req.files as { [fieldname: string]: Express.Multer.File[] };
     const uploadResults = [];
 
-    // Process image file (2D analysis)
+    // Process image file (2D analysis) - legacy support, but should be wrapped in ZIP now
     if (files.image && files.image[0]) {
       const imageFile = files.image[0];
       
       try {
-        // Upload to Wasabi
+        const wasabiStartTime = Date.now();
         const uploadResult = await WasabiStorageService.uploadImage(
           imageFile.buffer,
           imageFile.originalname,
@@ -241,8 +228,10 @@ export const uploadScanFiles = async (req: Request, res: Response): Promise<void
             'patientid': report.patient.toString().replace(/[^\w]/g, '')
           }
         );
+        const wasabiTime = Date.now();
+        console.log(`⏱️ Wasabi upload: ${((wasabiTime - wasabiStartTime) / 1000).toFixed(2)}s`);
 
-        // Create scan record
+        const scanRecordStartTime = Date.now();
         const scanRecord = new ScanRecord({
           report: report._id,
           scanType,
@@ -257,6 +246,8 @@ export const uploadScanFiles = async (req: Request, res: Response): Promise<void
         });
 
         await scanRecord.save();
+        const scanRecordTime = Date.now();
+        console.log(`⏱️ ScanRecord save: ${((scanRecordTime - scanRecordStartTime) / 1000).toFixed(2)}s`);
 
         uploadResults.push({
           type: '2D',
@@ -275,11 +266,13 @@ export const uploadScanFiles = async (req: Request, res: Response): Promise<void
       }
     }
 
-    // Process ZIP file (3D analysis)
+    // Process ZIP file (3D analysis - MRI, CT-SCAN, X-RAY)
     if (files.zipFile && files.zipFile[0]) {
       const zipFile = files.zipFile[0];
       
       try {
+        console.log(`📦 Starting ZIP upload: ${zipFile.originalname} (${(zipFile.size / (1024 * 1024)).toFixed(2)} MB)`);
+        
         // Upload to Wasabi
         const uploadResult = await WasabiStorageService.uploadZipFile(
           zipFile.buffer,
@@ -290,6 +283,8 @@ export const uploadScanFiles = async (req: Request, res: Response): Promise<void
             'patientid': report.patient.toString().replace(/[^\w]/g, '')
           }
         );
+
+        console.log(`✅ ZIP uploaded to Wasabi: ${uploadResult.key}`);
 
         // Create scan record
         const scanRecord = new ScanRecord({
@@ -306,6 +301,7 @@ export const uploadScanFiles = async (req: Request, res: Response): Promise<void
         });
 
         await scanRecord.save();
+        console.log(`✅ Scan record created: ${scanRecord._id}`);
 
         uploadResults.push({
           type: '3D',
@@ -314,7 +310,7 @@ export const uploadScanFiles = async (req: Request, res: Response): Promise<void
         });
 
       } catch (error) {
-        console.error('ZIP upload error:', error);
+        console.error('❌ ZIP upload error:', error);
         res.status(500).json({
           success: false,
           message: 'Failed to upload ZIP file',
@@ -332,23 +328,38 @@ export const uploadScanFiles = async (req: Request, res: Response): Promise<void
       return;
     }
 
-    // Update report status
+    const reportUpdateStartTime = Date.now();
     report.status = 'in_progress';
     await report.save();
+    const reportUpdateTime = Date.now();
+    console.log(`⏱️ Report save: ${((reportUpdateTime - reportUpdateStartTime) / 1000).toFixed(2)}s`);
 
-    res.json({
-      success: true,
-      message: 'Files uploaded successfully',
-      data: uploadResults
-    });
+    const totalTime = ((Date.now() - startTime) / 1000).toFixed(2);
+    console.log(`✅ Upload complete in ${totalTime}s. Sending response with ${uploadResults.length} file(s)`);
+
+    // Ensure response is sent
+    if (!res.headersSent) {
+      res.json({
+        success: true,
+        message: 'Files uploaded successfully',
+        data: uploadResults
+      });
+      console.log(`✅ Response sent successfully`);
+    } else {
+      console.warn('⚠️ Response already sent, cannot send upload success response');
+    }
 
   } catch (error) {
-    console.error('Upload scan files error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to upload scan files',
-      error: error instanceof Error ? error.message : 'Unknown error'
-    });
+    console.error('❌ Upload scan files error:', error);
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        message: 'Failed to upload scan files',
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+    } else {
+      console.error('⚠️ Response already sent, cannot send error response');
+    }
   }
 };
 
@@ -359,9 +370,15 @@ export const startAnalysis = async (req: Request, res: Response): Promise<void> 
   try {
     const { scanRecordId } = req.params;
     const { analysisType } = req.body;
+    const userFilter = getUserFilter(req);
 
-    const scanRecord = await ScanRecord.findById(scanRecordId);
-    if (!scanRecord) {
+    const scanRecord = await ScanRecord.findById(scanRecordId)
+      .populate({
+        path: 'report',
+        match: userFilter
+      });
+    
+    if (!scanRecord || !scanRecord.report) {
       res.status(404).json({
         success: false,
         message: 'Scan record not found'
@@ -421,10 +438,30 @@ export const startAnalysis = async (req: Request, res: Response): Promise<void> 
 
     } catch (error) {
       console.error('Analysis start error:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      
+      try {
+        await ScanRecord.findByIdAndUpdate(scanRecordId, {
+          analysisStatus: 'failed',
+          analysisCompletedAt: new Date()
+        });
+      } catch (updateError) {
+        console.error('Failed to update scan record status on error:', updateError);
+      }
+      
+      let userMessage = 'Failed to start analysis';
+      if (errorMessage.includes('unavailable') || errorMessage.includes('ECONNREFUSED')) {
+        userMessage = 'Analysis service is currently unavailable. Please try again later or contact support.';
+      } else if (errorMessage.includes('Cannot resolve hostname')) {
+        userMessage = 'Analysis service configuration error. Please contact support.';
+      } else if (errorMessage.includes('timeout')) {
+        userMessage = 'Analysis service request timed out. Please try again.';
+      }
+      
       res.status(500).json({
         success: false,
-        message: 'Failed to start analysis',
-        error: error instanceof Error ? error.message : 'Unknown error'
+        message: userMessage,
+        error: errorMessage
       });
       return;
     }
@@ -449,8 +486,9 @@ export const updateReportWithAnalysis = async (req: Request, res: Response): Pro
   try {
     const { reportId } = req.params;
     const { diagnosis, confidence, treatment, symptoms, urgency } = req.body;
+    const userFilter = getUserFilter(req);
 
-    const report = await RadiologyReport.findById(reportId);
+    const report = await RadiologyReport.findOne({ _id: reportId, ...userFilter });
     if (!report) {
       res.status(404).json({
         success: false,
@@ -503,9 +541,19 @@ export const updateAnalysisResult = async (req: Request, res: Response): Promise
       debugInfo,
       errorMessage
     } = req.body;
+    const userFilter = getUserFilter(req);
 
-    const analysisResult = await AnalysisResult.findById(analysisId);
-    if (!analysisResult) {
+    const analysisResult = await AnalysisResult.findById(analysisId)
+      .populate({
+        path: 'scanRecord',
+        populate: {
+          path: 'report',
+          match: userFilter
+        }
+      });
+    
+    if (!analysisResult || !analysisResult.scanRecord || 
+        !(analysisResult.scanRecord as any).report) {
       res.status(404).json({
         success: false,
         message: 'Analysis result not found'
@@ -563,12 +611,14 @@ export const updateAnalysisResult = async (req: Request, res: Response): Promise
 export const getAnalysisResult = async (req: Request, res: Response): Promise<void> => {
   try {
     const { analysisId } = req.params;
+    const userFilter = getUserFilter(req);
 
     const analysisResult = await AnalysisResult.findById(analysisId)
       .populate({
         path: 'scanRecord',
         populate: {
           path: 'report',
+          match: userFilter,
           populate: {
             path: 'patient',
             select: 'name age gender'
@@ -576,7 +626,8 @@ export const getAnalysisResult = async (req: Request, res: Response): Promise<vo
         }
       });
 
-    if (!analysisResult) {
+    if (!analysisResult || !analysisResult.scanRecord || 
+        !(analysisResult.scanRecord as any).report) {
       res.status(404).json({
         success: false,
         message: 'Analysis result not found'
@@ -600,15 +651,69 @@ export const getAnalysisResult = async (req: Request, res: Response): Promise<vo
 };
 
 /**
+ * Get scan record status (efficient endpoint for polling)
+ */
+export const getScanRecordStatus = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { scanRecordId } = req.params;
+    const userFilter = getUserFilter(req);
+
+    // Get scan record with report (to verify access)
+    const scanRecord = await ScanRecord.findById(scanRecordId)
+      .populate({
+        path: 'report',
+        match: userFilter
+      });
+
+    if (!scanRecord || !scanRecord.report) {
+      res.status(404).json({
+        success: false,
+        message: 'Scan record not found'
+      });
+      return;
+    }
+
+    // Get analysis result if it exists
+    const analysisResult = await AnalysisResult.findOne({ scanRecord: scanRecord._id });
+
+    // Return only the essential status information
+    res.json({
+      success: true,
+      data: {
+        _id: scanRecord._id,
+        analysisStatus: scanRecord.analysisStatus,
+        analysisResult: analysisResult || null,
+        analysisCompletedAt: scanRecord.analysisCompletedAt,
+        analysisStartedAt: scanRecord.analysisStartedAt
+      }
+    });
+
+  } catch (error) {
+    console.error('Get scan record status error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get scan record status',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+};
+
+/**
  * Generate download URL for a file
  */
 export const generateDownloadUrl = async (req: Request, res: Response): Promise<void> => {
   try {
     const { scanRecordId } = req.params;
-    const { fileType } = req.query; // 'original', 'analyzed', or 'report'
+    const { fileType } = req.query;
+    const userFilter = getUserFilter(req);
 
-    const scanRecord = await ScanRecord.findById(scanRecordId);
-    if (!scanRecord) {
+    const scanRecord = await ScanRecord.findById(scanRecordId)
+      .populate({
+        path: 'report',
+        match: userFilter
+      });
+    
+    if (!scanRecord || !scanRecord.report) {
       res.status(404).json({
         success: false,
         message: 'Scan record not found'
@@ -640,7 +745,12 @@ export const generateDownloadUrl = async (req: Request, res: Response): Promise<
       return;
     }
 
-    const downloadUrl = await WasabiStorageService.generateDownloadUrl(fileKey, 3600); // 1 hour expiry
+    // For large files (3D DICOM), use longer expiration (24 hours)
+    // For smaller files, use 1 hour
+    const fileSize = scanRecord.fileSize || 0;
+    const expiresIn = fileSize > 100 * 1024 * 1024 ? 86400 : 3600; // 24 hours for files > 100MB, 1 hour otherwise
+    
+    const downloadUrl = await WasabiStorageService.generateDownloadUrl(fileKey, expiresIn);
 
     res.json({
       success: true,
@@ -667,8 +777,18 @@ export const getPatientRadiologyReports = async (req: Request, res: Response): P
   try {
     const { patientId } = req.params;
     const { page = 1, limit = 10, status } = req.query;
+    const userFilter = getUserFilter(req);
 
-    const query: any = { patient: patientId };
+    const patient = await Patient.findOne({ _id: patientId, ...userFilter });
+    if (!patient) {
+      res.status(404).json({
+        success: false,
+        message: 'Patient not found'
+      });
+      return;
+    }
+
+    const query: any = { patient: patientId, ...userFilter };
     if (status) {
       query.status = status;
     }
@@ -711,14 +831,14 @@ export const deleteRadiologyReport = async (req: Request, res: Response): Promis
   try {
     const { reportId } = req.params;
 
-    // Find the report - handle both ObjectId and custom reportId
     const isObjectId = /^[0-9a-fA-F]{24}$/.test(reportId);
+    const userFilter = getUserFilter(req);
     
     let report;
     if (isObjectId) {
-      report = await RadiologyReport.findById(reportId);
+      report = await RadiologyReport.findOne({ _id: reportId, ...userFilter });
     } else {
-      report = await RadiologyReport.findOne({ reportId });
+      report = await RadiologyReport.findOne({ reportId, ...userFilter });
     }
     
     if (!report) {
@@ -782,11 +902,15 @@ export const deleteRadiologyReport = async (req: Request, res: Response): Promis
 export const deleteScanRecord = async (req: Request, res: Response): Promise<void> => {
   try {
     const { scanRecordId } = req.params;
+    const userFilter = getUserFilter(req);
 
-    // Find the scan record
-    const scanRecord = await ScanRecord.findById(scanRecordId);
+    const scanRecord = await ScanRecord.findById(scanRecordId)
+      .populate({
+        path: 'report',
+        match: userFilter
+      });
     
-    if (!scanRecord) {
+    if (!scanRecord || !scanRecord.report) {
       res.status(404).json({
         success: false,
         message: 'Scan record not found'

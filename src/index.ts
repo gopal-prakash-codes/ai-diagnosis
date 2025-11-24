@@ -10,6 +10,7 @@ import userRoutes from './routes/user';
 import diagnosisRoutes from './routes/diagnosis';
 import patientRoutes from './routes/patient';
 import radiologyRoutes from './routes/radiology';
+import invitationRoutes from './routes/invitation';
 import { authenticateToken } from './middleware/auth';
 import WasabiStorageService from './services/wasabiStorage';
 
@@ -32,6 +33,10 @@ const limiter = rateLimit({
   message: 'Too many requests from this IP, please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => {
+    // Skip rate limiting for upload routes (they take longer)
+    return req.path.includes('/upload');
+  }
 });
 app.use(limiter);
 
@@ -43,9 +48,33 @@ const authLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-// Body parsing middleware
+// Body parsing middleware (multer handles multipart/form-data, so these limits don't apply to file uploads)
 app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Extended timeout for upload routes
+app.use((req, res, next) => {
+  if (req.path.includes('/upload')) {
+    // Set very long timeout for large file uploads (30 minutes)
+    req.setTimeout(30 * 60 * 1000, () => {
+      if (!res.headersSent) {
+        res.status(408).json({
+          success: false,
+          message: 'Upload timeout: The file is too large or upload is taking too long'
+        });
+      }
+    });
+    res.setTimeout(30 * 60 * 1000, () => {
+      if (!res.headersSent) {
+        res.status(408).json({
+          success: false,
+          message: 'Upload timeout: Response timeout'
+        });
+      }
+    });
+  }
+  next();
+});
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -62,6 +91,7 @@ app.use('/api/users', authenticateToken, userRoutes);
 app.use('/api/diagnosis', diagnosisRoutes);
 app.use('/api/patients', patientRoutes);
 app.use('/api/radiology', radiologyRoutes);
+app.use('/api/invitations', invitationRoutes);
 
 // 404 handler
 app.use('*', (req, res) => {
@@ -85,6 +115,8 @@ const startServer = async () => {
     console.log('WASABI_SECRET_ACCESS_KEY:', process.env.WASABI_SECRET_ACCESS_KEY ? 'SET' : 'MISSING');
     console.log('WASABI_BUCKET_NAME:', process.env.WASABI_BUCKET_NAME || 'MISSING');
     console.log('PYTHON_API_BASE_URL:', process.env.PYTHON_API_BASE_URL || 'MISSING');
+    console.log('PYTHON_API_BASE_URL_2D:', process.env.PYTHON_API_BASE_URL_2D || 'MISSING');
+    console.log('ANALYSIS_URL:', process.env.ANALYSIS_URL || 'MISSING');
 
     // Validate Wasabi configuration
     if (WasabiStorageService.validateConfiguration()) {

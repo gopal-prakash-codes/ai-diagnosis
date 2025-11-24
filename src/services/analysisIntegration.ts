@@ -4,11 +4,23 @@ import { AnalysisResult } from '../models/AnalysisResult';
 import { RadiologyReport } from '../models/RadiologyReport';
 import WasabiStorageService from './wasabiStorage';
 import dotenv from 'dotenv';
+import path from 'path';
 
-dotenv.config();
+// Load environment variables with explicit path
+dotenv.config({ path: path.resolve(process.cwd(), '.env') });
+
+// Debug: Log environment variables at module load
+console.log('🔍 [AnalysisIntegration] Environment variables check:');
+console.log('  PYTHON_API_BASE_URL:', process.env.PYTHON_API_BASE_URL || 'MISSING');
+console.log('  PYTHON_API_BASE_URL_2D:', process.env.PYTHON_API_BASE_URL_2D || 'MISSING');
 
 const PYTHON_API_BASE_URL = process.env.PYTHON_API_BASE_URL || 'http://localhost:8000';
 const PYTHON_API_BASE_URL_2D = process.env.PYTHON_API_BASE_URL_2D || 'http://116.202.210.102:9012';
+
+// Log the actual constants being used
+console.log('🔍 [AnalysisIntegration] Constants initialized:');
+console.log('  PYTHON_API_BASE_URL constant:', PYTHON_API_BASE_URL);
+console.log('  PYTHON_API_BASE_URL_2D constant:', PYTHON_API_BASE_URL_2D);
 
 export interface Analysis2DResult {
   modality?: string;
@@ -76,7 +88,8 @@ export class AnalysisIntegrationService {
         throw new Error('Failed to download file from storage');
       }
 
-      const fileBuffer = await fileResponse.buffer();
+      const arrayBuffer = await fileResponse.arrayBuffer();
+      const fileBuffer = Buffer.from(arrayBuffer);
 
       // Validate that it's actually an image file
       const validImageTypes = ['image/jpeg', 'image/jpg', 'image/png'];
@@ -164,11 +177,21 @@ export class AnalysisIntegrationService {
           }
           
         } catch (fetchError) {
-          lastError = `Network error connecting to Python Analysis Service: ${fetchError instanceof Error ? fetchError.message : String(fetchError)}`;
+          const errorMessage = fetchError instanceof Error ? fetchError.message : String(fetchError);
+          
+          if (errorMessage.includes('ECONNREFUSED') || errorMessage.includes('connect')) {
+            lastError = `Python Analysis Service is unavailable at ${PYTHON_API_BASE_URL_2D}. Please check if the service is running and accessible.`;
+          } else if (errorMessage.includes('ENOTFOUND') || errorMessage.includes('getaddrinfo')) {
+            lastError = `Cannot resolve hostname for Python Analysis Service at ${PYTHON_API_BASE_URL_2D}. Please check the service URL configuration.`;
+          } else if (errorMessage.includes('timeout')) {
+            lastError = `Request to Python Analysis Service timed out. The service may be overloaded.`;
+          } else {
+            lastError = `Network error connecting to Python Analysis Service: ${errorMessage}`;
+          }
+          
           console.warn(`Analysis attempt ${attempt} failed:`, lastError);
           
           if (attempt < maxRetries) {
-            // Shorter delays: 3s, 5s
             const delay = attempt === 1 ? 3000 : 5000;
             console.log(`Waiting ${delay/1000}s before retry...`);
             await new Promise(resolve => setTimeout(resolve, delay));
@@ -177,7 +200,15 @@ export class AnalysisIntegrationService {
       }
 
       if (!response || !response.ok) {
-        throw new Error(lastError || 'Failed to connect to Python Analysis Service after multiple attempts');
+        const finalError = lastError || 'Failed to connect to Python Analysis Service after multiple attempts';
+        console.error(`❌ 2D Analysis Service Connection Failed: ${finalError}`);
+        console.error(`Service URL: ${PYTHON_API_BASE_URL_2D}`);
+        console.error(`Please verify:`);
+        console.error(`  1. The Python Analysis Service is running`);
+        console.error(`  2. The service URL is correct (check PYTHON_API_BASE_URL_2D env variable)`);
+        console.error(`  3. Network connectivity to ${PYTHON_API_BASE_URL_2D}`);
+        console.error(`  4. Firewall rules allow connections to the service`);
+        throw new Error(finalError);
       }
 
       const result: Analysis2DResult = await response.json() as Analysis2DResult;
@@ -200,7 +231,10 @@ export class AnalysisIntegrationService {
       // Update the main report with analysis results
       try {
         console.log('Updating main report with analysis results...');
-        await updateMainReportWithAnalysis(scanRecord.report.toString(), result);
+        const reportId = typeof scanRecord.report === 'object' && scanRecord.report !== null && '_id' in scanRecord.report
+          ? (scanRecord.report as any)._id.toString()
+          : scanRecord.report.toString();
+        await updateMainReportWithAnalysis(reportId, result);
       } catch (updateError) {
         console.error('Failed to update main report with analysis results:', updateError);
         // Don't fail the entire analysis if report update fails
@@ -256,7 +290,8 @@ export class AnalysisIntegrationService {
         throw new Error('Failed to download file from storage');
       }
 
-      const fileBuffer = await fileResponse.buffer();
+      const arrayBuffer = await fileResponse.arrayBuffer();
+      const fileBuffer = Buffer.from(arrayBuffer);
 
       // Create FormData for API request
       const FormData = require('form-data');
@@ -323,11 +358,21 @@ export class AnalysisIntegrationService {
           }
           
         } catch (fetchError) {
-          lastError = `Network error connecting to Python Analysis Service: ${fetchError instanceof Error ? fetchError.message : String(fetchError)}`;
+          const errorMessage = fetchError instanceof Error ? fetchError.message : String(fetchError);
+          
+          if (errorMessage.includes('ECONNREFUSED') || errorMessage.includes('connect')) {
+            lastError = `Python Analysis Service is unavailable at ${PYTHON_API_BASE_URL}. Please check if the service is running and accessible.`;
+          } else if (errorMessage.includes('ENOTFOUND') || errorMessage.includes('getaddrinfo')) {
+            lastError = `Cannot resolve hostname for Python Analysis Service at ${PYTHON_API_BASE_URL}. Please check the service URL configuration.`;
+          } else if (errorMessage.includes('timeout')) {
+            lastError = `Request to Python Analysis Service timed out. The service may be overloaded.`;
+          } else {
+            lastError = `Network error connecting to Python Analysis Service: ${errorMessage}`;
+          }
+          
           console.warn(`3D analysis attempt ${attempt} failed:`, lastError);
           
           if (attempt < maxRetries) {
-            // Shorter delays: 3s, 5s
             const delay = attempt === 1 ? 3000 : 5000;
             console.log(`Waiting ${delay/1000}s before retry...`);
             await new Promise(resolve => setTimeout(resolve, delay));
@@ -336,7 +381,15 @@ export class AnalysisIntegrationService {
       }
 
       if (!response || !response.ok) {
-        throw new Error(lastError || 'Failed to connect to Python Analysis Service after multiple attempts');
+        const finalError = lastError || 'Failed to connect to Python Analysis Service after multiple attempts';
+        console.error(`❌ 3D Analysis Service Connection Failed: ${finalError}`);
+        console.error(`Service URL: ${PYTHON_API_BASE_URL}`);
+        console.error(`Please verify:`);
+        console.error(`  1. The Python Analysis Service is running`);
+        console.error(`  2. The service URL is correct (check PYTHON_API_BASE_URL env variable)`);
+        console.error(`  3. Network connectivity to ${PYTHON_API_BASE_URL}`);
+        console.error(`  4. Firewall rules allow connections to the service`);
+        throw new Error(finalError);
       }
 
       const result = await response.json() as { job_id: string; state: string };
@@ -372,13 +425,25 @@ export class AnalysisIntegrationService {
       return jobId;
 
     } catch (error) {
-      console.error(`3D Analysis failed to start for scan record ${scanRecordId}:`, error);
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      console.error(`3D Analysis failed to start for scan record ${scanRecordId}:`, errorMessage);
       
       // Update records with error status
       await ScanRecord.findByIdAndUpdate(scanRecordId, {
         analysisStatus: 'failed',
         analysisCompletedAt: new Date()
       });
+
+      // Create or update analysis result with error
+      await AnalysisResult.findOneAndUpdate(
+        { scanRecord: scanRecordId },
+        {
+          analysisStatus: 'failed',
+          analysisCompletedAt: new Date(),
+          errorMessage: errorMessage
+        },
+        { upsert: true }
+      );
 
       throw error;
     }
@@ -451,7 +516,8 @@ export class AnalysisIntegrationService {
         
         if (resultResponse.ok) {
           // Upload result ZIP to Wasabi storage
-          const resultBuffer = await resultResponse.buffer();
+          const arrayBuffer = await resultResponse.arrayBuffer();
+          const resultBuffer = Buffer.from(arrayBuffer);
           const resultFileName = `${jobId}_results.zip`;
           
           const uploadResult = await WasabiStorageService.uploadFile(
@@ -630,8 +696,9 @@ export class AnalysisIntegrationService {
       if (!response.ok) {
         throw new Error(`Download failed: ${response.status}`);
       }
-
-      return await response.buffer();
+      
+      const arrayBuffer = await response.arrayBuffer();
+      return Buffer.from(arrayBuffer);
 
     } catch (error) {
       console.error(`Error downloading result for job ${jobId}:`, error);

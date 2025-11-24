@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { Patient } from '../models/Patient';
 import { createError } from '../middleware/errorHandler';
+import { getUserFilter } from '../utils/userFilter';
 
 export const createPatient = async (
   req: Request,
@@ -10,7 +11,17 @@ export const createPatient = async (
   try {
     const { name, age, gender } = req.body;
 
+    if (!req.user!.organization) {
+      res.status(400).json({
+        success: false,
+        message: 'User does not belong to an organization'
+      });
+      return;
+    }
+
     const patient = new Patient({
+      user: req.user!._id,
+      organization: req.user!.organization,
       name,
       age,
       gender
@@ -38,11 +49,10 @@ export const getAllPatients = async (
     const limit = parseInt(req.query.limit as string) || 10;
     const skip = (page - 1) * limit;
 
-    // Search functionality
     const search = req.query.search as string;
     const gender = req.query.gender as string;
     
-    let query: any = {};
+    let query: any = { ...getUserFilter(req) };
     
     if (search) {
       query.name = { $regex: search, $options: 'i' };
@@ -83,8 +93,9 @@ export const getPatientById = async (
 ): Promise<void> => {
   try {
     const { id } = req.params;
+    const userFilter = getUserFilter(req);
 
-    const patient = await Patient.findById(id);
+    const patient = await Patient.findOne({ _id: id, ...userFilter });
     if (!patient) {
       res.status(404).json({
         success: false,
@@ -110,8 +121,9 @@ export const updatePatient = async (
   try {
     const { id } = req.params;
     const { name, age, gender } = req.body;
+    const userFilter = getUserFilter(req);
 
-    const patient = await Patient.findById(id);
+    const patient = await Patient.findOne({ _id: id, ...userFilter });
     if (!patient) {
       res.status(404).json({
         success: false,
@@ -143,9 +155,10 @@ export const deletePatient = async (
   next: NextFunction
 ): Promise<void> => {
   try {
-    const { id } = req.params;                                               
+    const { id } = req.params;
+    const userFilter = getUserFilter(req);
 
-    const patient = await Patient.findById(id);
+    const patient = await Patient.findOne({ _id: id, ...userFilter });
     if (!patient) {
       res.status(404).json({
         success: false,
@@ -171,9 +184,11 @@ export const getPatientStats = async (
   next: NextFunction
 ): Promise<void> => {
   try {
-    const totalPatients = await Patient.countDocuments({});
+    const userFilter = getUserFilter(req);
+    const totalPatients = await Patient.countDocuments(userFilter);
     
     const genderStats = await Patient.aggregate([
+      { $match: userFilter },
       {
         $group: {
           _id: '$gender',
@@ -183,6 +198,7 @@ export const getPatientStats = async (
     ]);
 
     const ageStats = await Patient.aggregate([
+      { $match: userFilter },
       {
         $group: {
           _id: null,

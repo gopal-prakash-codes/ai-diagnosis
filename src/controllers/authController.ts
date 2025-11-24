@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { User } from '../models/User';
+import { Organization } from '../models/Organization';
 import { generateToken, JWTPayload } from '../middleware/auth';
 import { createError } from '../middleware/errorHandler';
 
@@ -21,21 +22,36 @@ export const register = async (
       return;
     }
 
-    // Create new user
+    // Create new user as admin
     const user = new User({
       email,
       password,
       firstName,
-      lastName
+      lastName,
+      role: 'admin'
     });
 
+    await user.save();
+
+    // Create organization for the admin
+    const organization = new Organization({
+      name: `${firstName} ${lastName}'s Organization`,
+      admin: user._id,
+      members: []
+    });
+
+    await organization.save();
+
+    // Update user with organization reference
+    user.organization = organization._id;
     await user.save();
 
     // Generate JWT token
     const payload: JWTPayload = {
       userId: user._id.toString(),
       email: user.email,
-      role: user.role
+      role: user.role,
+      organizationId: organization._id.toString()
     };
 
     const token = generateToken(payload);
@@ -49,7 +65,8 @@ export const register = async (
           email: user.email,
           firstName: user.firstName,
           lastName: user.lastName,
-          role: user.role
+          role: user.role,
+          organization: organization._id
         },
         token
       }
@@ -100,11 +117,15 @@ export const login = async (
     user.lastLogin = new Date();
     await user.save();
 
+    // Populate organization if exists
+    await user.populate('organization');
+
     // Generate JWT token
     const payload: JWTPayload = {
       userId: user._id.toString(),
       email: user.email,
-      role: user.role
+      role: user.role,
+      organizationId: user.organization ? (user.organization as any)._id.toString() : undefined
     };
 
     const token = generateToken(payload);
@@ -119,6 +140,7 @@ export const login = async (
           firstName: user.firstName,
           lastName: user.lastName,
           role: user.role,
+          organization: user.organization,
           lastLogin: user.lastLogin
         },
         token
@@ -143,10 +165,41 @@ export const getProfile = async (
       return;
     }
 
+    // Populate organization and get all members
+    const user = await User.findById(req.user._id)
+      .populate('organization')
+      .select('-password');
+
+    if (!user || !user.organization) {
+      res.status(404).json({
+        success: false,
+        message: 'User or organization not found'
+      });
+      return;
+    }
+
+    const organization = await Organization.findById(user.organization)
+      .populate('admin', 'firstName lastName email role')
+      .populate('members', 'firstName lastName email role isActive lastLogin');
+
+    // Get all users in the organization (admin + members)
+    const allMembers = organization ? [
+      organization.admin,
+      ...organization.members
+    ].filter(Boolean) : [];
+
     res.status(200).json({
       success: true,
       data: {
-        user: req.user
+        user: {
+          id: user._id,
+          email: user.email,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          role: user.role,
+          organization: organization
+        },
+        teamMembers: allMembers
       }
     });
   } catch (error) {
@@ -160,8 +213,6 @@ export const logout = async (
   next: NextFunction
 ): Promise<void> => {
   try {
-    // In a stateless JWT setup, logout is handled client-side
-    // You could implement a blacklist for tokens if needed
     res.status(200).json({
       success: true,
       message: 'Logout successful'

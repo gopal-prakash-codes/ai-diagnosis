@@ -6,6 +6,7 @@ import OpenAI from 'openai';
 import fs from "fs";
 import { AssemblyAI } from 'assemblyai';
 import crypto from 'crypto';
+import { getUserFilter } from '../utils/userFilter';
 
 const parseJSONWithFallback = (input: string): any => {
   if (!input) {
@@ -205,19 +206,9 @@ export const transcribeWithSpeakers = async (req: Request, res: Response, next: 
       return;
     }
 
-    console.log('🚀 Starting parallel processing:', {
-      fileExists: fs.existsSync(filePath),
-      fileSize: stats.size,
-      fileExtension: fileExtension,
-      assemblyApiKey: !!process.env.ASSEMBLY_API_KEY,
-      openaiApiKey: !!process.env.OPENAI_API_KEY
-    });
-
     const [assemblyResult, openaiResult] = await Promise.allSettled([
       (async () => {
-        console.log('🎤 Assembly AI: Starting upload...');
         const uploadUrl = await assemblyClient.files.upload(filePath);
-        console.log('🎤 Assembly AI: Upload successful, starting transcription...');
         const config = {
           audio_url: uploadUrl,
           speaker_labels: true,
@@ -235,14 +226,12 @@ export const transcribeWithSpeakers = async (req: Request, res: Response, next: 
       })(),
 
       (async () => {
-        console.log('🎤 OpenAI Whisper: Starting translation...');
         try {
           const result = await openaiClient.audio.translations.create({
             file: fs.createReadStream(filePath),
             model: "whisper-1",
             response_format: "text"
           });
-          console.log('🎤 OpenAI Whisper: Translation completed successfully');
           return result;
         } catch (error: any) {
           console.error('🎤 OpenAI Whisper: Translation failed with error:', {
@@ -264,19 +253,6 @@ export const transcribeWithSpeakers = async (req: Request, res: Response, next: 
 
     if (openaiResult.status === 'fulfilled' && openaiResult.value) {
       transcriptText = (openaiResult.value as any).toString().trim() || "";
-      console.log('✅ OpenAI Whisper SUCCESS:', {
-        textLength: transcriptText.length,
-        preview: transcriptText.substring(0, 100),
-        fullText: transcriptText
-      });
-    } else {
-      console.error('❌ OpenAI Whisper FAILED:', {
-        status: openaiResult.status,
-        reason: openaiResult.status === 'rejected' ? openaiResult.reason : 'Unknown error',
-        errorMessage: openaiResult.status === 'rejected' ? openaiResult.reason?.message : null,
-        errorCode: openaiResult.status === 'rejected' ? openaiResult.reason?.code : null,
-        errorStatus: openaiResult.status === 'rejected' ? openaiResult.reason?.status : null
-      });
     }
 
     if (assemblyResult.status === 'fulfilled' && assemblyResult.value) {
@@ -318,17 +294,7 @@ export const transcribeWithSpeakers = async (req: Request, res: Response, next: 
       }
     }
 
-    console.log('📊 Final Results Summary:', {
-      whisperSuccess: !!transcriptText,
-      whisperTextLength: transcriptText?.length || 0,
-      assemblySuccess: speakerSegments.length > 0,
-      speakerCount: speakerSegments.length,
-      usingWhisperText: !!transcriptText,
-      fallbackToAssembly: !transcriptText && speakerSegments.length > 0
-    });
-
     if (transcriptText && speakerSegments.length > 0) {
-      console.log('✅ HYBRID SUCCESS: Both Whisper and Assembly AI worked');
       const alignedSpeakers = alignWhisperWithSpeakers(transcriptText, speakerSegments);
 
       res.json({
@@ -338,7 +304,6 @@ export const transcribeWithSpeakers = async (req: Request, res: Response, next: 
         message: `Hybrid success! Whisper translation (multilingual→English) with ${[...new Set(alignedSpeakers.map(s => s.speaker))].length} speaker(s) detected by Assembly AI`
       });
     } else if (transcriptText) {
-      console.log('⚠️ WHISPER ONLY: Whisper worked, Assembly AI failed');
       const fallbackSpeakers = createFallbackSpeakerDetection(transcriptText);
 
       res.json({
@@ -350,7 +315,6 @@ export const transcribeWithSpeakers = async (req: Request, res: Response, next: 
           "Whisper transcription successful, but speaker detection failed"
       });
     } else if (speakerSegments.length > 0) {
-      console.log('⚠️ ASSEMBLY ONLY: Assembly AI worked, Whisper failed');
       const assemblyText = speakerSegments.map(s => s.text).join(' ');
       res.json({
         success: true,
@@ -359,7 +323,6 @@ export const transcribeWithSpeakers = async (req: Request, res: Response, next: 
         message: "Speaker detection successful, but Whisper transcription failed"
       });
     } else {
-      console.log('❌ TOTAL FAILURE: Both services failed');
       res.status(500).json({
         success: false,
         error: "Both Whisper transcription and Assembly AI speaker detection failed"
@@ -986,7 +949,6 @@ const analyzeConversationWithOpenAI = async (
   
   for (const model of modelsToTry) {
     try {
-      console.log(`Attempting to use model: ${model} with seed: ${seed}`);
       const completion = await openai.chat.completions.create({
         model: model,
         temperature: 0.0, 
@@ -1079,7 +1041,6 @@ Focus on what's NEW or DIFFERENT from the previous consultation and how it affec
       throw new Error('No response from OpenAI');
     }
 
-    console.log(`Successfully used model: ${model}`);
     const analysis = JSON.parse(responseContent);
 
     let diagnosisData = [];
@@ -1118,7 +1079,6 @@ Focus on what's NEW or DIFFERENT from the previous consultation and how it affec
       summary: analysis.summary || 'Analysis completed but summary not available'
     };
 
-    console.log(`Generated fresh analysis for conversation`);
 
     return result;
     
@@ -1167,7 +1127,16 @@ export const analyzeConversation = async (
       return;
     }
 
-    const patient = await Patient.findById(patientId);
+    if (!req.user!.organization) {
+      res.status(400).json({
+        success: false,
+        message: 'User does not belong to an organization'
+      });
+      return;
+    }
+
+    const userFilter = getUserFilter(req);
+    const patient = await Patient.findOne({ _id: patientId, ...userFilter });
     if (!patient) {
       res.status(404).json({
         success: false,
@@ -1178,11 +1147,11 @@ export const analyzeConversation = async (
 
     const exactMatch = await Diagnosis.findOne({
       patient: patientId,
-      conversationText: conversationText
+      conversationText: conversationText,
+      ...userFilter
     }).sort({ createdAt: -1 });
 
     if (exactMatch) {
-      console.log(`Found identical conversation, returning existing diagnosis ID: ${exactMatch._id}`);
       res.status(200).json({
         success: true,
         message: 'Using existing diagnosis for identical conversation',
@@ -1210,7 +1179,8 @@ export const analyzeConversation = async (
     let previousDiagnosis = null;
     if (updateExisting) {
       const recentDiagnosis = await Diagnosis.findOne({ 
-        patient: patientId 
+        patient: patientId,
+        ...userFilter
       }).sort({ createdAt: -1 });
       
       if (recentDiagnosis) {
@@ -1221,12 +1191,6 @@ export const analyzeConversation = async (
           treatment: recentDiagnosis.treatment,
           previousConversation: recentDiagnosis.conversationText
         };
-        
-        console.log(`Using previous diagnosis context for conversation extension:`, {
-          previousSymptoms: recentDiagnosis.symptoms,
-          previousDiagnosis: recentDiagnosis.diagnosis,
-          previousConfidence: recentDiagnosis.confidence
-        });
       }
     }
 
@@ -1246,7 +1210,8 @@ export const analyzeConversation = async (
     let diagnosis;
     if (updateExisting) {
       const recentDiagnosis = await Diagnosis.findOne({ 
-        patient: patientId 
+        patient: patientId,
+        ...userFilter
       }).sort({ createdAt: -1 });
       
       if (recentDiagnosis && isConversationExtension(recentDiagnosis.conversationText, conversationText)) {
@@ -1259,34 +1224,35 @@ export const analyzeConversation = async (
             diagnosis: analysis.diagnosis,
             treatment: analysis.treatment,
             confidence: analysis.confidence,
-            doctor: req.user?.email || 'AI System',
             updatedAt: new Date()
           },
           { new: true }
         );
       } else {
         diagnosis = new Diagnosis({
+          user: req.user!._id,
+          organization: req.user!.organization,
           patient: patientId,
           conversationText,
           symptoms: analysis.symptoms,
           allergies: analysis.allergies,
           diagnosis: analysis.diagnosis,
           treatment: analysis.treatment,
-          confidence: analysis.confidence,
-          doctor: req.user?.email || 'AI System'
+          confidence: analysis.confidence
         });
         await diagnosis.save();
       }
     } else {
       diagnosis = new Diagnosis({
+        user: req.user!._id,
+        organization: req.user!.organization,
         patient: patientId,
         conversationText,
         symptoms: analysis.symptoms,
         allergies: analysis.allergies,
         diagnosis: analysis.diagnosis,
         treatment: analysis.treatment,
-        confidence: analysis.confidence,
-        doctor: req.user?.email || 'AI System'
+        confidence: analysis.confidence
       });
       await diagnosis.save();
     }
@@ -1341,8 +1307,9 @@ export const getDiagnosisHistory = async (
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 10;
     const skip = (page - 1) * limit;
+    const userFilter = getUserFilter(req);
 
-    const patient = await Patient.findById(patientId);
+    const patient = await Patient.findOne({ _id: patientId, ...userFilter });
     if (!patient) {
       res.status(404).json({
         success: false,
@@ -1351,12 +1318,12 @@ export const getDiagnosisHistory = async (
       return;
     }
 
-    const diagnoses = await Diagnosis.find({ patient: patientId })
+    const diagnoses = await Diagnosis.find({ patient: patientId, ...userFilter })
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit);
 
-    const total = await Diagnosis.countDocuments({ patient: patientId });
+    const total = await Diagnosis.countDocuments({ patient: patientId, ...userFilter });
 
     res.status(200).json({
       success: true,
@@ -1388,8 +1355,9 @@ export const getDiagnosisById = async (
 ): Promise<void> => {
   try {
     const { id } = req.params;
+    const userFilter = getUserFilter(req);
 
-    const diagnosis = await Diagnosis.findById(id);
+    const diagnosis = await Diagnosis.findOne({ _id: id, ...userFilter });
     if (!diagnosis) {
       res.status(404).json({
         success: false,

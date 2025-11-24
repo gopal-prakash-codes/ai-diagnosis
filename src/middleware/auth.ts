@@ -15,6 +15,7 @@ export interface JWTPayload {
   userId: string;
   email: string;
   role: string;
+  organizationId?: string;
 }
 
 export const authenticateToken = async (
@@ -34,7 +35,9 @@ export const authenticateToken = async (
     const decoded = jwt.verify(token, process.env.JWT_SECRET!) as JWTPayload;
     
     // Find user and check if still active
-    const user = await User.findById(decoded.userId).select('-password');
+    const user = await User.findById(decoded.userId)
+      .populate('organization')
+      .select('-password');
     
     if (!user || !user.isActive) {
       res.status(401).json({ message: 'Invalid or inactive user' });

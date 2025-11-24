@@ -1,18 +1,20 @@
-import AWS from 'aws-sdk';
+import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, HeadObjectCommand, ListObjectsV2Command, S3ClientConfig } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-// Configure Wasabi S3-compatible storage
+// Wasabi Storage Configuration
+// For India/Asia: Use ap-southeast-1 (Singapore) - FASTEST
+// For US: Use us-east-2 (Ohio) or us-east-1 (Virginia)
+// For Europe: Use eu-central-1 (Amsterdam)
 const wasabiEndpoint = process.env.WASABI_ENDPOINT || 'https://s3.wasabisys.com';
 const wasabiBucket = process.env.WASABI_BUCKET_NAME || 'ai-diagnosis-storage';
-
-// Validate credentials before creating S3 instance
 const accessKeyId = process.env.WASABI_ACCESS_KEY_ID;
 const secretAccessKey = process.env.WASABI_SECRET_ACCESS_KEY;
-const region = process.env.WASABI_REGION || 'us-east-1';
+const region = process.env.WASABI_REGION || 'ap-southeast-1'; // Default to Asia Pacific for better global performance
 
 if (!accessKeyId || !secretAccessKey) {
   console.error('Missing Wasabi credentials:');
@@ -23,19 +25,24 @@ if (!accessKeyId || !secretAccessKey) {
   console.error('WASABI_ENDPOINT:', wasabiEndpoint);
 }
 
-const s3 = new AWS.S3({
+const s3ClientConfig: S3ClientConfig = {
   endpoint: wasabiEndpoint,
-  accessKeyId: accessKeyId,
-  secretAccessKey: secretAccessKey,
   region: region,
-  s3ForcePathStyle: true,
-  signatureVersion: 'v4',
-  // Force credentials to be passed explicitly
   credentials: {
     accessKeyId: accessKeyId!,
     secretAccessKey: secretAccessKey!
-  }
-});
+  },
+  forcePathStyle: true,
+  // Performance optimizations for faster downloads
+  requestHandler: {
+    requestTimeout: 30 * 60 * 1000, // 30 minutes for large files
+  },
+  // Retry configuration for better reliability
+  maxAttempts: 3,
+  retryMode: 'adaptive' as const,
+};
+
+const s3Client = new S3Client(s3ClientConfig);
 
 export interface UploadResult {
   url: string;
@@ -98,23 +105,28 @@ export class WasabiStorageService {
         ...metadata
       });
 
-      const uploadParams: AWS.S3.PutObjectRequest = {
+      const command = new PutObjectCommand({
         Bucket: wasabiBucket,
         Key: key,
         Body: buffer,
         ContentType: contentType,
-        ACL: acl,
         Metadata: sanitizedMetadata
-      };
+      });
 
       console.log(`Uploading file to Wasabi: ${key}`);
       console.log('Sanitized metadata:', sanitizedMetadata);
-      const result = await s3.upload(uploadParams).promise();
+      console.log(`File size: ${(buffer.length / (1024 * 1024)).toFixed(2)} MB`);
+      
+      const startTime = Date.now();
+      await s3Client.send(command);
+      const uploadTime = ((Date.now() - startTime) / 1000).toFixed(2);
+      
+      console.log(`✅ File uploaded to Wasabi successfully in ${uploadTime}s: ${key}`);
 
       return {
-        url: result.Location,
-        key: result.Key,
-        bucket: result.Bucket,
+        url: `${wasabiEndpoint}/${wasabiBucket}/${key}`,
+        key: key,
+        bucket: wasabiBucket,
         size: buffer.length,
         contentType
       };
@@ -192,8 +204,13 @@ export class WasabiStorageService {
 
   /**
    * Generate a pre-signed URL for file download (with caching)
+   * @param key - S3 object key
+   * @param expiresIn - Expiration time in seconds (default: 1 hour, can be up to 7 days for large files)
    */
   static async generateDownloadUrl(key: string, expiresIn: number = 3600): Promise<string> {
+    // Cap expiration at 7 days (604800 seconds) as per S3/Wasabi limits
+    const maxExpiration = 7 * 24 * 60 * 60; // 7 days
+    expiresIn = Math.min(expiresIn, maxExpiration);
     try {
       const now = Date.now();
       const cacheKey = `${key}:${expiresIn}`;
@@ -203,14 +220,15 @@ export class WasabiStorageService {
         return cached.url;
       }
 
-      // Generate new signed URL
-      const params = {
+      const command = new GetObjectCommand({
         Bucket: wasabiBucket,
         Key: key,
-        Expires: expiresIn // URL expires in seconds (default: 1 hour)
-      };
+        // Add response headers for better download performance
+        ResponseContentDisposition: `attachment; filename="${path.basename(key)}"`,
+        ResponseCacheControl: 'public, max-age=3600', // Cache for 1 hour
+      });
 
-      const url = s3.getSignedUrl('getObject', params);
+      const url = await getSignedUrl(s3Client, command, { expiresIn });
       urlCache.set(cacheKey, {
         url,
         expiresAt: now + (expiresIn * 1000) - 300000
@@ -229,12 +247,12 @@ export class WasabiStorageService {
    */
   static async deleteFile(key: string): Promise<void> {
     try {
-      const params = {
+      const command = new DeleteObjectCommand({
         Bucket: wasabiBucket,
         Key: key
-      };
+      });
 
-      await s3.deleteObject(params).promise();
+      await s3Client.send(command);
       console.log(`File deleted from Wasabi: ${key}`);
     } catch (error) {
       console.error('Error deleting file from Wasabi:', error);
@@ -247,15 +265,15 @@ export class WasabiStorageService {
    */
   static async fileExists(key: string): Promise<boolean> {
     try {
-      const params = {
+      const command = new HeadObjectCommand({
         Bucket: wasabiBucket,
         Key: key
-      };
+      });
 
-      await s3.headObject(params).promise();
+      await s3Client.send(command);
       return true;
-    } catch (error) {
-      if ((error as AWS.AWSError).statusCode === 404) {
+    } catch (error: any) {
+      if (error.$metadata?.httpStatusCode === 404) {
         return false;
       }
       throw error;
@@ -265,14 +283,14 @@ export class WasabiStorageService {
   /**
    * Get file metadata
    */
-  static async getFileMetadata(key: string): Promise<AWS.S3.HeadObjectOutput> {
+  static async getFileMetadata(key: string) {
     try {
-      const params = {
+      const command = new HeadObjectCommand({
         Bucket: wasabiBucket,
         Key: key
-      };
+      });
 
-      return await s3.headObject(params).promise();
+      return await s3Client.send(command);
     } catch (error) {
       console.error('Error getting file metadata:', error);
       throw new Error(`Failed to get file metadata: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -282,15 +300,15 @@ export class WasabiStorageService {
   /**
    * List files in a folder
    */
-  static async listFiles(prefix: string = '', maxKeys: number = 1000): Promise<AWS.S3.Object[]> {
+  static async listFiles(prefix: string = '', maxKeys: number = 1000): Promise<any[]> {
     try {
-      const params = {
+      const command = new ListObjectsV2Command({
         Bucket: wasabiBucket,
         Prefix: prefix,
         MaxKeys: maxKeys
-      };
+      });
 
-      const result = await s3.listObjectsV2(params).promise();
+      const result = await s3Client.send(command);
       return result.Contents || [];
     } catch (error) {
       console.error('Error listing files:', error);
@@ -355,7 +373,11 @@ export class WasabiStorageService {
    */
   static async testConnection(): Promise<boolean> {
     try {
-      await s3.listObjectsV2({ Bucket: wasabiBucket, MaxKeys: 1 }).promise();
+      const command = new ListObjectsV2Command({ 
+        Bucket: wasabiBucket, 
+        MaxKeys: 1 
+      });
+      await s3Client.send(command);
       console.log('✅ Wasabi connection successful');
       return true;
     } catch (error) {

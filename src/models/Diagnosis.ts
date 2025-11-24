@@ -2,6 +2,8 @@ import mongoose, { Document, Schema } from 'mongoose';
 import { IPatient } from './Patient';
 
 export interface IDiagnosis extends Document {
+  user: mongoose.Types.ObjectId;
+  organization: mongoose.Types.ObjectId;
   patient: IPatient['_id'];
   conversationText: string;
   symptoms: string[];
@@ -9,12 +11,23 @@ export interface IDiagnosis extends Document {
   diagnosis: string;
   treatment?: string;
   confidence?: number;
-  doctor?: string;
   createdAt: Date;
   updatedAt: Date;
 }
 
 const diagnosisSchema = new Schema<IDiagnosis>({
+  user: {
+    type: Schema.Types.ObjectId,
+    ref: 'User',
+    required: [true, 'User reference is required'],
+    index: true
+  },
+  organization: {
+    type: Schema.Types.ObjectId,
+    ref: 'Organization',
+    required: [true, 'Organization reference is required'],
+    index: true
+  },
   patient: {
     type: Schema.Types.ObjectId,
     ref: 'Patient',
@@ -55,17 +68,15 @@ const diagnosisSchema = new Schema<IDiagnosis>({
     min: [0, 'Confidence cannot be negative'],
     max: [100, 'Confidence cannot exceed 100'],
     default: null
-  },
-  doctor: {
-    type: String,
-    trim: true,
-    default: null
   }
 }, {
   timestamps: true
 });
 
-// Index for better query performance
+diagnosisSchema.index({ user: 1, patient: 1 });
+diagnosisSchema.index({ user: 1, createdAt: -1 });
+diagnosisSchema.index({ organization: 1 });
+diagnosisSchema.index({ organization: 1, createdAt: -1 });
 diagnosisSchema.index({ patient: 1 });
 diagnosisSchema.index({ createdAt: -1 });
 diagnosisSchema.index({ diagnosis: 1 });

@@ -2,13 +2,12 @@ import mongoose, { Document, Schema } from 'mongoose';
 import { IPatient } from './Patient';
 
 export interface IRadiologyReport extends Document {
+  user: mongoose.Types.ObjectId;
+  organization: mongoose.Types.ObjectId;
   patient: IPatient['_id'];
   reportId: string;
   reportType: string;
   date: Date;
-  doctor: string;
-  clinicName: string;
-  clinicAddress: string;
   symptoms: string[];
   diagnosis?: string;
   confidence?: number;
@@ -19,6 +18,18 @@ export interface IRadiologyReport extends Document {
 }
 
 const radiologyReportSchema = new Schema<IRadiologyReport>({
+  user: {
+    type: Schema.Types.ObjectId,
+    ref: 'User',
+    required: [true, 'User reference is required'],
+    index: true
+  },
+  organization: {
+    type: Schema.Types.ObjectId,
+    ref: 'Organization',
+    required: [true, 'Organization reference is required'],
+    index: true
+  },
   patient: {
     type: Schema.Types.ObjectId,
     ref: 'Patient',
@@ -39,24 +50,6 @@ const radiologyReportSchema = new Schema<IRadiologyReport>({
   date: {
     type: Date,
     default: Date.now
-  },
-  doctor: {
-    type: String,
-    default: 'Dr. [To be filled]',
-    trim: true,
-    maxlength: [100, 'Doctor name cannot exceed 100 characters']
-  },
-  clinicName: {
-    type: String,
-    default: 'Clinic [To be filled]',
-    trim: true,
-    maxlength: [200, 'Clinic name cannot exceed 200 characters']
-  },
-  clinicAddress: {
-    type: String,
-    default: 'Address [To be filled]',
-    trim: true,
-    maxlength: [500, 'Clinic address cannot exceed 500 characters']
   },
   symptoms: {
     type: [String],
@@ -93,7 +86,10 @@ const radiologyReportSchema = new Schema<IRadiologyReport>({
   timestamps: true
 });
 
-// Indexes for better query performance
+radiologyReportSchema.index({ user: 1, patient: 1 });
+radiologyReportSchema.index({ user: 1, createdAt: -1 });
+radiologyReportSchema.index({ organization: 1 });
+radiologyReportSchema.index({ organization: 1, createdAt: -1 });
 radiologyReportSchema.index({ patient: 1 });
 radiologyReportSchema.index({ reportId: 1 });
 radiologyReportSchema.index({ reportType: 1 });

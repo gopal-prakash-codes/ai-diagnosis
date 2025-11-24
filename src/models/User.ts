@@ -7,6 +7,7 @@ export interface IUser extends Document {
   firstName: string;
   lastName: string;
   role: 'user' | 'admin';
+  organization?: mongoose.Types.ObjectId;
   isActive: boolean;
   lastLogin?: Date;
   createdAt: Date;
@@ -43,7 +44,12 @@ const userSchema = new Schema<IUser>({
   role: {
     type: String,
     enum: ['user', 'admin'],
-    default: 'user'
+    default: 'user' 
+  },
+  organization: {
+    type: Schema.Types.ObjectId,
+    ref: 'Organization',
+    index: true
   },
   isActive: {
     type: Boolean,
@@ -83,5 +89,6 @@ userSchema.methods.comparePassword = async function(candidatePassword: string): 
 // Index for better query performance
 userSchema.index({ email: 1 });
 userSchema.index({ role: 1 });
+userSchema.index({ organization: 1 });
 
 export const User = mongoose.model<IUser>('User', userSchema);

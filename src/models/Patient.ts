@@ -1,6 +1,8 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
 export interface IPatient extends Document {
+  user: mongoose.Types.ObjectId;
+  organization: mongoose.Types.ObjectId;
   name: string;
   age: number;
   gender: 'male' | 'female' | 'other';
@@ -9,6 +11,18 @@ export interface IPatient extends Document {
 }
 
 const patientSchema = new Schema<IPatient>({
+  user: {
+    type: Schema.Types.ObjectId,
+    ref: 'User',
+    required: [true, 'User reference is required'],
+    index: true
+  },
+  organization: {
+    type: Schema.Types.ObjectId,
+    ref: 'Organization',
+    required: [true, 'Organization reference is required'],
+    index: true
+  },
   name: {
     type: String,
     required: [true, 'Patient name is required'],
@@ -33,7 +47,10 @@ const patientSchema = new Schema<IPatient>({
   timestamps: true
 });
 
-// Index for better query performance
+patientSchema.index({ user: 1, name: 1 });
+patientSchema.index({ user: 1, createdAt: -1 });
+patientSchema.index({ organization: 1 });
+patientSchema.index({ organization: 1, createdAt: -1 });
 patientSchema.index({ name: 1 });
 patientSchema.index({ age: 1 });
 patientSchema.index({ gender: 1 });

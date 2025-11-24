@@ -8,6 +8,7 @@ import {
   updateAnalysisResult,
   updateReportWithAnalysis,
   getAnalysisResult,
+  getScanRecordStatus,
   generateDownloadUrl,
   getPatientRadiologyReports,
   deleteRadiologyReport,
@@ -34,18 +35,6 @@ router.post('/reports', [
     .optional()
     .isIn(['Report', 'MRI', 'CT-SCAN', 'X-RAY'])
     .withMessage('Report type must be Report, MRI, CT-SCAN, or X-RAY'),
-  body('doctor')
-    .optional()
-    .isLength({ max: 100 })
-    .withMessage('Doctor name must be less than 100 characters'),
-  body('clinicName')
-    .optional()
-    .isLength({ max: 200 })
-    .withMessage('Clinic name must be less than 200 characters'),
-  body('clinicAddress')
-    .optional()
-    .isLength({ max: 500 })
-    .withMessage('Clinic address must be less than 500 characters'),
   body('symptoms')
     .optional()
     .isArray()
@@ -226,6 +215,19 @@ router.get('/analysis/:analysisId', [
     .isMongoId()
     .withMessage('Invalid analysis ID format')
 ], getAnalysisResult);
+
+/**
+ * @route GET /api/radiology/scans/:scanRecordId/status
+ * @desc Get scan record status (efficient endpoint for polling)
+ * @access Private
+ */
+router.get('/scans/:scanRecordId/status', [
+  param('scanRecordId')
+    .notEmpty()
+    .withMessage('Scan record ID is required')
+    .isMongoId()
+    .withMessage('Invalid scan record ID format')
+], getScanRecordStatus);
 
 /**
  * @route GET /api/radiology/scans/:scanRecordId/download
